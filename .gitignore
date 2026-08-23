@@ -1,6 +1,26 @@
-node_modules
-dist
-dist-electron
-release
+# ── Node / Electron ──────────────────────────────────────────
+node_modules/
+dist/
+dist-electron/
+release/
+
+# ── Build artifacts & output ─────────────────────────────────
+PosturePet_Installer/
+build_env/
+
+# ── Compiled binaries ────────────────────────────────────────
+*.exe
+detector.spec
+
+# ── Python cache ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+
+# ── Logs ─────────────────────────────────────────────────────
 *.log
+detector_error.log
+
+# ── OS / Editor ──────────────────────────────────────────────
 .DS_Store
+Thumbs.db
+build/

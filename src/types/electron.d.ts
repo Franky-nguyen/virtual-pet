@@ -3,6 +3,9 @@ export interface ElectronAPI {
   removePostureListener: () => void
   calibratePosture: () => void
   setMode: (mode: 'dashboard' | 'taskbar') => void
+  onSetMode: (callback: (mode: 'dashboard' | 'taskbar') => void) => void
+  loadSave: () => Promise<{ health: number, xp: number }>
+  writeSave: (data: { health: number, xp: number }) => void
 }
 
 export interface PostureData {

@@ -27,10 +27,11 @@ button, input {
    absolutely-positioned layer, all stacked on the same anchor, so the browser
    NEVER swaps a background-image URL at runtime — posture changes only toggle
    `opacity` between layers, which avoids the repaint micro-stutter/flicker.
-   The `frames-N` utilities set the sheet's frame count, which drives the
-   sprite-sheet width and the animation stepping. */
+   The `--frames` CSS variable is set per-layer (inline in PetDisplay) and
+   drives both the background-size width and the animation step count. */
 .sprite-base {
   --frame-size: 64px;
+  --frames: 4;
   width: var(--frame-size);
   height: var(--frame-size);
   image-rendering: pixelated;
@@ -42,12 +43,25 @@ button, input {
   animation: play-sprite calc(var(--frames) * 0.15s) steps(var(--frames)) infinite;
 }
 
-.frames-4 { --frames: 4; }
-.frames-2 { --frames: 2; }
-
 @keyframes play-sprite {
   from { background-position: 0px 0px; }
   to { background-position: calc(-1 * var(--frames) * var(--frame-size)) 0px; }
+}
+
+/* Walk sprite: 6 frames at 48×48px (288px wide sheet).
+   Uses a dedicated keyframe so the to-position (background-offset) is
+   baked as the literal value -288px rather than being derived from
+   CSS vars that the keyframe reads at parse-time (not at runtime). */
+.walk-sprite {
+  width: 48px;
+  height: 48px;
+  background-size: 288px 48px;
+  animation: play-walk 0.3s steps(6) infinite;
+}
+
+@keyframes play-walk {
+  from { background-position: 0px 0px; }
+  to   { background-position: -288px 0px; }
 }
 
 /* Hurt layer: sprite playback + red flash + shake. Applied unconditionally to
@@ -181,6 +195,18 @@ button, input {
   }
   html {
     @apply font-sans;
+  }
+}
+
+/* ── Accessory bob animation — retained for future use if needed ── */
+@keyframes accessory-bob {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(2px); }
+}
+
+@layer utilities {
+  .animate-accessory-bob {
+    animation: accessory-bob 0.6s steps(2) infinite;
   }
 }
 

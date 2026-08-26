@@ -36,18 +36,32 @@ const killBackgroundProcesses = () => {
 // posture server was never reachable — so it can never double-spawn when the
 // launcher already started the backend.
 const isWindows = process.platform === 'win32'
+const detectorPath = path.join(__dirname, '../detector.py')
 
-// Resolve a usable Python interpreter without ever throwing: probe the common
-// commands for the host OS (Windows: python -> py -> python3; macOS/Linux:
-// python3 -> python) with `--version` and pick the first that answers.
-// Probing with `--version` also avoids triggering the Windows Store alias,
-// which only pops open when run with no arguments.
-const resolvePythonCmd = (): string | null => {
-  const candidates = isWindows ? ['python', 'py', 'python3'] : ['python3', 'python']
-  for (const cmd of candidates) {
+// Resolve a usable Python interpreter without ever throwing. numpy<2 (required
+// by cv2/mediapipe) only ships wheels up to Python 3.12, and the default
+// `python` on a fresh machine resolves to 3.14 with NumPy 2.x — which crashes
+// cv2 at import (`_ARRAY_API not found`). Prefer, in order:
+//   1. the project-local Python 3.12 virtualenv created by start.bat /
+//      build-installer.bat (`venv\Scripts\python.exe`);
+//   2. the `py` launcher pinned to 3.12;
+//   3. whatever `py` / `python` / `python3` resolves to, as a last resort.
+// Each candidate is probed with `--version` (never with no arguments, which
+// would trigger the Windows Store alias).
+type PyCommand = string[] // argv: [executable, ...fixed-flags]
+const resolvePythonCmd = (): PyCommand | null => {
+  const venvPython = isWindows
+    ? path.join(path.dirname(detectorPath), 'venv', 'Scripts', 'python.exe')
+    : path.join(path.dirname(detectorPath), 'venv', 'bin', 'python')
+  if (existsSync(venvPython)) return [venvPython]
+
+  const candidates: string[][] = isWindows
+    ? [['py', '-3.12'], ['py'], ['python'], ['python3']]
+    : [['python3'], ['python']]
+  for (const argv of candidates) {
     try {
-      const probe = spawnSync(cmd, ['--version'], { stdio: 'ignore', timeout: 5000 })
-      if (probe.status === 0) return cmd
+      const probe = spawnSync(argv[0], [...argv.slice(1), '--version'], { stdio: 'ignore', timeout: 5000 })
+      if (probe.status === 0) return argv
     } catch {
       // Command not found or unusable — try the next candidate.
     }
@@ -56,12 +70,12 @@ const resolvePythonCmd = (): string | null => {
 }
 
 const pythonCmd = resolvePythonCmd()
-const detectorPath = path.join(__dirname, '../detector.py')
-// Crash log lives next to the detector in dev (project root) and next to the
-// executable in packaged builds — app.asar is read-only, so the log cannot
-// live beside detectorPath there.
+// Crash log lives next to the detector in dev (project root) and in the
+// always-writable userData dir in packaged builds — app.asar is read-only,
+// and the exe's own folder may be non-writable (e.g. per-machine installs),
+// where createWriteStream would fail silently and lose the traceback.
 const detectorLogPath = app.isPackaged
-  ? path.join(path.dirname(app.getPath('exe')), 'detector_error.log')
+  ? path.join(app.getPath('userData'), 'detector_error.log')
   : path.join(path.dirname(detectorPath), 'detector_error.log')
 let backendConnected = false
 let detectorSpawned = false
@@ -97,31 +111,34 @@ const startDetector = () => {
   if (detectorSpawned) return
   detectorSpawned = true
 
-  // Packaged build: spawn the PyInstaller-compiled binary shipped in the
-  // installer's resources folder — no Python installation required.
-  if (app.isPackaged) {
-    const exePath = path.join(process.resourcesPath, 'detector.exe')
-    if (!existsSync(exePath)) {
-      const msg = `Packaged detector not found at ${exePath}`
-      console.error(msg)
-      writeFileSync(detectorLogPath, msg)
-      return
-    }
-    console.log(`Starting posture detector: ${exePath}`)
-    const logStream = createWriteStream(detectorLogPath, { flags: 'w' });
-    pythonProcess = spawn(exePath, [], { stdio: ['ignore', 'ignore', 'pipe'] });
-    const proc = pythonProcess;
-    proc.stderr?.pipe(logStream);
+  const logStream = createWriteStream(detectorLogPath, { flags: 'w' })
+
+  // Preferred: the PyInstaller-compiled binary — dev: next to this script;
+  // packaged: the installer's resources folder. No Python installation
+  // required, and it is the artifact of the Python 3.12 build pipeline, so it
+  // is immune to the NumPy 2.x / cv2 ABI breakage that crashes source-mode
+  // `python detector.py` on newer interpreters.
+  const bundledExe = app.isPackaged
+    ? path.join(process.resourcesPath, 'detector.exe')
+    : path.join(path.dirname(detectorPath), 'detector.exe')
+  if (existsSync(bundledExe)) {
+    console.log(`Starting posture detector: ${bundledExe}`)
+    pythonProcess = spawn(bundledExe, [], { stdio: ['ignore', 'ignore', 'pipe'] })
+    const proc = pythonProcess
+    proc.stderr?.pipe(logStream)
     proc.on('error', (err) => {
       console.error('Failed to start posture detector:', err.message)
-      writeFileSync(detectorLogPath, `Failed to start detector.exe: ${err.message}`);
-    });
+      writeFileSync(detectorLogPath, `Failed to start detector.exe: ${err.message}`)
+    })
     return
   }
 
-  // Development: run detector.py with the resolved Python interpreter.
+  // Fallback: run detector.py with the resolved Python interpreter. stderr is
+  // piped to a log file so Python crash tracebacks (missing cv2/mediapipe,
+  // NumPy ABI mismatch, camera init failure) are captured instead of
+  // vanishing behind stdio: 'ignore'.
   if (!pythonCmd) {
-    const msg = 'No Python 3 interpreter found (tried python/py/python3) — install it from https://www.python.org/downloads/'
+    const msg = 'No Python 3 interpreter found (tried venv, py -3.12, py, python, python3) — install it from https://www.python.org/downloads/'
     console.error(msg)
     writeFileSync(detectorLogPath, msg)
     return
@@ -132,18 +149,14 @@ const startDetector = () => {
     writeFileSync(detectorLogPath, msg)
     return
   }
-  console.log(`Starting posture detector: ${pythonCmd} ${detectorPath}`)
-  // Pipe stderr to a log file in the local game folder so Python crash
-  // tracebacks (missing cv2/websockets/etc.) are captured instead of
-  // vanishing behind stdio: 'ignore'.
-  const logStream = createWriteStream(detectorLogPath, { flags: 'w' });
-  pythonProcess = spawn(pythonCmd, [detectorPath], { stdio: ['ignore', 'ignore', 'pipe'] });
-  const proc = pythonProcess;
-  proc.stderr?.pipe(logStream);
+  console.log(`Starting posture detector: ${pythonCmd.join(' ')} ${detectorPath}`)
+  pythonProcess = spawn(pythonCmd[0], [...pythonCmd.slice(1), detectorPath], { stdio: ['ignore', 'ignore', 'pipe'] })
+  const proc = pythonProcess
+  proc.stderr?.pipe(logStream)
   proc.on('error', (err) => {
     console.error('Failed to start posture detector:', err.message)
-    writeFileSync(detectorLogPath, `Failed to start python: ${err.message}`);
-  });
+    writeFileSync(detectorLogPath, `Failed to start python: ${err.message}`)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -157,9 +170,15 @@ if (!gotTheLock) {
 } else {
   // Focus (and restore) the existing window when a second instance is launched.
   app.on('second-instance', () => {
+    console.log('[main] second-instance: focusing existing window')
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
+      // show() covers a hidden window; moveTop() defeats Windows' foreground
+      // lock, which otherwise silently ignores focus() from a background
+      // process — the classic "clicking the shortcut does nothing" symptom.
+      mainWindow.show()
       mainWindow.focus()
+      mainWindow.moveTop()
     }
   })
 }
@@ -167,10 +186,135 @@ if (!gotTheLock) {
 let mainWindow: BrowserWindow | null = null
 let ws: WebSocket | null = null
 let calibrationPending = false
-// Top-level references prevent garbage collection (Tray vanishes otherwise)
-// and track the dashboard window bounds so we can restore them later.
+// Top-level reference prevents garbage collection (Tray vanishes otherwise).
 let tray: Tray | null = null
-let dashboardBounds: Electron.Rectangle | null = null
+
+// The dashboard window's fixed launch size. The tray "Open Dashboard" handler
+// and the set-mode restore path MUST restore exactly these dimensions — a
+// mismatched guess (previously 480×640) reopened the dashboard larger than the
+// initial launch size. Always restore via these constants so they can't drift.
+const DASHBOARD_WIDTH = 380
+const DASHBOARD_HEIGHT = 620
+
+// The floating pet widget size when minimized to taskbar — sized to fit the
+// pet circle + timer column in src/App.tsx taskbar mode (180×180).
+const TASKBAR_SIZE = 180
+
+// ── Two-way window-mode bridge ───────────────────────────────────────────────
+// shrinkToTaskbar / restoreDashboard are the ONLY code paths that physically
+// resize the window, and both are driven exclusively by the renderer's
+// 'ui-ready' handshake: the renderer flips its layout FIRST, then confirms the
+// DOM has been painted, and only then do we resize — so the OS window can
+// never race ahead of the UI (the squish-race). Every step is logged so a
+// broken chain is immediately visible in the main-process console.
+const shrinkToTaskbar = (): boolean => {
+  if (!mainWindow) {
+    console.error('[main] shrinkToTaskbar: mainWindow is null — aborting')
+    return false
+  }
+  console.log('[main] shrinkToTaskbar: current bounds', mainWindow.getBounds())
+
+  // Windows ignores setBounds on windows created with resizable: false, so we
+  // must unlock resizing (and unmaximize) BEFORE changing the bounds.
+  console.log('[main] shrinkToTaskbar: unlocking resizable + unmaximizing')
+  mainWindow.setResizable(true)
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+
+  const workArea = screen.getPrimaryDisplay().workArea
+  const targetX = Math.floor(workArea.x + workArea.width - TASKBAR_SIZE)
+  const targetY = Math.floor(workArea.y + workArea.height - TASKBAR_SIZE)
+  const targetBounds: Electron.Rectangle = {
+    x: targetX,
+    y: targetY,
+    width: TASKBAR_SIZE,
+    height: TASKBAR_SIZE,
+  }
+  console.log('[main] shrinkToTaskbar: workArea', workArea, '-> target bounds', targetBounds)
+
+  // Lower the minimum BELOW the target size first — otherwise Electron/Windows
+  // clamps the shrink to the dashboard minimum and the widget never collapses.
+  mainWindow.setMinimumSize(100, 100)
+  console.log('[main] shrinkToTaskbar: setMinimumSize(100, 100)')
+
+  // Physically shrink to the small square at the bottom-right of the work area.
+  mainWindow.setSize(TASKBAR_SIZE, TASKBAR_SIZE)
+  mainWindow.setPosition(targetX, targetY)
+  // Persistent floating widget: pin it above nearly everything ('screen-saver'
+  // level is only honored on macOS but is harmless on Windows) and follow
+  // virtual-desktop switches so the pet is never buried or lost.
+  mainWindow.setAlwaysOnTop(true, 'screen-saver')
+  mainWindow.setVisibleOnAllWorkspaces(true)
+  // Physically pop the widget onto the screen, overriding any OS-minimized or
+  // hidden state, so the pet is immediately visible as the floating widget.
+  mainWindow.show()
+  mainWindow.focus()
+
+  // setBounds can be applied asynchronously on Windows; re-apply after a tick
+  // and re-lock resizing so the pet widget can't be accidentally resized.
+  setTimeout(() => {
+    if (!mainWindow) return
+    console.log('[main] shrinkToTaskbar: re-applying bounds (async safety)')
+    mainWindow.setBounds(targetBounds)
+    mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    mainWindow.setResizable(false)
+    console.log('[main] shrinkToTaskbar: done — bounds now', mainWindow.getBounds())
+    // Notify renderer AFTER window is confirmed at new size — prevents a render
+    // cycle into a still-tiny window (the race that caused cut-off UI on the
+    // "Minimize to Tray" tray path).
+    mainWindow.webContents.send('mode-changed', 'taskbar')
+  }, 50)
+
+  return true
+}
+
+const restoreDashboard = (): boolean => {
+  if (!mainWindow) {
+    console.error('[main] restoreDashboard: mainWindow is null — aborting')
+    return false
+  }
+  console.log('[main] restoreDashboard: current bounds', mainWindow.getBounds())
+  console.log('[main] restoreDashboard: unlocking resizable + unmaximizing')
+  mainWindow.setResizable(true)
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+
+  // Explicitly raise the minimum BEFORE resizing so Windows accepts the larger
+  // dashboard size (a previous shrink left the minimum at 100×100).
+  mainWindow.setMinimumSize(DASHBOARD_WIDTH, DASHBOARD_HEIGHT)
+  console.log('[main] restoreDashboard: setMinimumSize', DASHBOARD_WIDTH, 'x', DASHBOARD_HEIGHT)
+
+  // Enforce the exact dashboard size, then center it on screen.
+  mainWindow.setSize(DASHBOARD_WIDTH, DASHBOARD_HEIGHT)
+  mainWindow.center()
+  console.log('[main] restoreDashboard: sized', DASHBOARD_WIDTH, 'x', DASHBOARD_HEIGHT, '+ centered')
+
+  // Bring the window back and take it off the always-on-top layer so the main
+  // dashboard acts like a normal window again (and stops following virtual
+  // desktops).
+  mainWindow.setAlwaysOnTop(false)
+  mainWindow.setVisibleOnAllWorkspaces(false)
+  mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+
+  // Re-lock resizing for dashboard mode (prevents accidental resize).
+  mainWindow.setResizable(false)
+  console.log('[main] restoreDashboard: done — bounds now', mainWindow.getBounds())
+
+  // Windows can apply the resize asynchronously after unlocking resizing —
+  // re-assert the size/position after a tick so the restore is bulletproof.
+  // Notify renderer AFTER window is confirmed at new size to prevent a render
+  // cycle into a still-tiny window (the race that caused cut-off UI on the
+  // "Up Arrow" expand path).
+  setTimeout(() => {
+    if (!mainWindow) return
+    console.log('[main] restoreDashboard: re-asserting size + centered position')
+    mainWindow.setSize(DASHBOARD_WIDTH, DASHBOARD_HEIGHT)
+    mainWindow.center()
+    mainWindow.webContents.send('mode-changed', 'dashboard')
+  }, 50)
+
+  return true
+}
 
 const sendCalibrationCommand = () => {
   if (ws?.readyState === WebSocket.OPEN) {
@@ -226,18 +370,32 @@ const connectToPostureServer = () => {
   })
 }
 
+// Resolve the app icon for the window taskbar button and the system-tray
+// notification-area icon. Tries the packaged location first (dist/icon.png
+// inside the asar, copied there from public/ at build time), then the dev-tree
+// public/ folder. Falls back to an empty image — invisible, never crashes.
+const resolveAppIcon = () => {
+  const candidates = [
+    path.join(__dirname, '../dist/icon.png'),       // packaged / post-build
+    path.join(__dirname, '../../public/icon.png'),  // vite dev tree
+  ]
+  return nativeImage.createFromPath(candidates.find((p) => existsSync(p)) ?? '')
+}
+
 const createWindow = () => {
   mainWindow = new BrowserWindow({
-    width: 380,
-    height: 620,
+    width: DASHBOARD_WIDTH,
+    height: DASHBOARD_HEIGHT,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
     resizable: false,
-    skipTaskbar: true,
+    // Explicit taskbar icon: without this, Windows shows a generic Electron
+    // icon (and skipTaskbar: true used to remove the taskbar button entirely).
+    icon: resolveAppIcon(),
     hasShadow: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true
     }
@@ -270,46 +428,17 @@ const createWindow = () => {
 // reliably when the compositor does not replay a stale shader cache.
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache')
 
-// Handle mode switching from renderer
-ipcMain.on('set-mode', (_event, mode: 'dashboard' | 'taskbar') => {
-  if (!mainWindow) return
-
-  if (mode === 'taskbar') {
-    // Save current bounds before shrinking to the pet widget.
-    dashboardBounds = mainWindow.getBounds()
-
-    // UNLOCK resizing so Windows doesn't block the shrink — setBounds is
-    // ignored on windows created with resizable: false, which made the pet
-    // vanish when minimizing.
-    mainWindow.setResizable(true)
-    if (mainWindow.isMaximized()) mainWindow.unmaximize()
-
-    const workArea = screen.getPrimaryDisplay().workArea
-    const winSize = 150
-    const targetX = Math.floor(workArea.x + workArea.width - winSize)
-    const targetY = Math.floor(workArea.y + workArea.height - winSize)
-
-    mainWindow.setMinimumSize(10, 10)
-    mainWindow.setBounds({ x: targetX, y: targetY, width: winSize, height: winSize })
-
-    setTimeout(() => {
-      if (!mainWindow) return
-      mainWindow.setBounds({ x: targetX, y: targetY, width: winSize, height: winSize })
-      mainWindow.setAlwaysOnTop(true)
-      mainWindow.setResizable(false) // LOCK it back
-    }, 50)
-
-  } else if (mode === 'dashboard') {
-    // UNLOCK resizing before restoring
-    mainWindow.setResizable(true)
-    if (dashboardBounds) {
-      mainWindow.setBounds(dashboardBounds)
-    } else {
-      mainWindow.setSize(380, 620)
-      mainWindow.center()
-    }
-    mainWindow.setAlwaysOnTop(false)
-    mainWindow.setResizable(false) // LOCK it back
+// Render handshake — renderer → main process. The renderer confirms it has
+// finished painting the new layout (taskbar widget or dashboard) BEFORE we
+// resize the window, so the OS window can never race ahead of the DOM update.
+ipcMain.on('ui-ready', (_event, targetMode: 'dashboard' | 'taskbar') => {
+  console.log('[main] IPC "ui-ready" received:', targetMode)
+  if (targetMode === 'taskbar') {
+    shrinkToTaskbar()
+  } else if (targetMode === 'dashboard') {
+    restoreDashboard()
+  } else {
+    console.warn('[main] ui-ready: unknown mode —', targetMode)
   }
 })
 
@@ -318,31 +447,51 @@ ipcMain.on('calibrate-posture', () => {
   sendCalibrationCommand()
 })
 
+// Forward debug-stream toggles from the renderer to the Python detector
+// (Ctrl+Shift+D in the dashboard). The backend only annotates/encodes frames
+// while at least one client has debug enabled, which keeps CPU at zero when
+// the overlay is closed.
+ipcMain.on('set-debug', (_event, enabled: boolean) => {
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ command: 'debug', enabled }))
+  }
+})
+
 app.whenReady().then(() => {
+  // A duplicate instance that failed the lock must quit WITHOUT creating
+  // anything — no window, no tray — so it can't leak a renderer process or
+  // touch the running instance's shared detector via cleanupDetector.
+  if (!gotTheLock) return
+
   createWindow()
 
-  // System tray with context menu. An empty NativeImage is used deliberately
-  // so the tray never crashes on a missing asset file.
-  tray = new Tray(nativeImage.createEmpty())
+  // System tray with context menu. The pet sprite doubles as the tray icon so
+  // the app has a visible presence in the notification area (falls back to an
+  // invisible empty image if the asset is ever missing — never crashes).
+  tray = new Tray(resolveAppIcon())
   tray.setToolTip('PosturePet')
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
-        label: 'Open Dashboard',
+        label: 'Minimize to Tray',
         click: () => {
-          if (!mainWindow) return
-          // Restore saved dashboard bounds (if any), show the window, and tell
-          // the renderer to switch back to dashboard mode. The window is
-          // created with resizable: false, so resizing must be unlocked around
-          // setBounds or Windows ignores it and the window vanishes.
-          if (dashboardBounds) {
-            mainWindow.setResizable(true) // UNLOCK before restoring bounds
-            mainWindow.setBounds(dashboardBounds)
-            mainWindow.setResizable(false) // LOCK it back
-          }
-          mainWindow.show()
-          mainWindow.setAlwaysOnTop(false)
-          mainWindow.webContents.send('set-mode', 'dashboard')
+          console.log('[main] Tray "Minimize to Tray" clicked')
+          const win = mainWindow
+          if (!win) return
+
+          // 1. Force the window awake and to the front, regardless of its
+          // current state (VBS launches run invisibly, so the renderer can be
+          // throttled even when the window is not technically minimized).
+          if (win.isMinimized()) win.restore()
+          win.show()
+          win.focus()
+
+          // 2. Unconditionally wait 150ms for Chromium to un-throttle the
+          // renderer before asking React to transition the UI.
+          setTimeout(() => {
+            console.log('[IPC] Sending force-taskbar-ui to renderer')
+            win.webContents.send('force-taskbar-ui')
+          }, 150)
         },
       },
       {
@@ -362,13 +511,27 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
+    } else if (mainWindow) {
+      // Clicked from the dock/taskbar while already running — bring it to the front.
+      mainWindow.show()
+      mainWindow.focus()
     }
   })
 })
 
-app.on('will-quit', cleanupDetector)
+app.on('will-quit', () => {
+  // Only the lock-holding instance owns the detector; a duplicate that is
+  // quitting must not touch it (cleanupDetector's image-name kill would
+  // also terminate the running instance's detector.exe).
+  if (!gotTheLock) return
+  cleanupDetector()
+})
 
 app.on('window-all-closed', () => {
+  // Same quarantine: a duplicate that never opened a window must not kill the
+  // running instance's detector while quitting itself.
+  if (!gotTheLock) return
+
   // Targeted PID-tree kill for the detector (handles PyInstaller bootloader child).
   cleanupDetector()
 

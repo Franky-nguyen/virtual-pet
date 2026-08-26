@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import json
+import math
 import os
 import time
 import urllib.request
@@ -53,6 +55,23 @@ landmarker = PoseLandmarker.create_from_options(options)
 
 
 # ---------------------------------------------------------------------------
+# Debug overlay: MediaPipe drawing utilities
+# ---------------------------------------------------------------------------
+# The classic `solutions` drawing helpers accept the NormalizedLandmarkList
+# emitted by the Tasks API PoseLandmarker. They are deprecated-but-present in
+# mediapipe 0.10.x; guard the import and fall back to manual cv2 drawing so
+# the debug overlay survives future mediapipe versions.
+try:
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+    POSE_CONNECTIONS = mp.solutions.pose.POSE_CONNECTIONS
+except (AttributeError, NotImplementedError):
+    mp_drawing = None
+    mp_drawing_styles = None
+    POSE_CONNECTIONS = frozenset()
+
+
+# ---------------------------------------------------------------------------
 # Detection and smoothing configuration
 # ---------------------------------------------------------------------------
 CALIBRATION_SAMPLE_COUNT = 12  # Within the requested 10-15 frame range.
@@ -81,6 +100,9 @@ clients: set = set()
 current_status = "away"
 last_detection_time = 0.0
 calibrate_requested = False
+# Debug mode is OFF unless a client explicitly asks for it — annotated frames
+# are only encoded/streamed while true, keeping CPU at ~zero in normal use.
+debug_enabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -149,15 +171,166 @@ def reset_smoothing() -> None:
     slouch_frames.clear()
 
 
-def frame_to_ratio(frame) -> Optional[float]:
-    """Run MediaPipe on an OpenCV frame and return its posture ratio."""
+def frame_to_result(frame):
+    """Run MediaPipe on an OpenCV frame.
+
+    Returns (landmarks, ratio): the raw landmark list (or None when no pose
+    is detected) and the computed posture ratio (or None).
+    """
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
     result = landmarker.detect(mp_image)
 
     if not result.pose_landmarks:
+        return None, None
+    landmarks = result.pose_landmarks[0]
+    return landmarks, calculate_posture_ratio(landmarks)
+
+
+def frame_to_ratio(frame) -> Optional[float]:
+    """Return the posture ratio for a frame, or None if no pose was found."""
+    return frame_to_result(frame)[1]
+
+
+# ---------------------------------------------------------------------------
+# Debug overlay rendering (streamed only while debug_enabled is true)
+# ---------------------------------------------------------------------------
+_DEBUG_STATUS_LABELS = {
+    "good": "GOOD_POSTURE",
+    "slouching": "SLOUCHING",
+    "away": "AWAY / NOT VISIBLE",
+    "calibrating": "CALIBRATING",
+}
+_DEBUG_STATUS_COLORS = {  # BGR: green = good, red = slouching, blue = calibrate
+    "good": (60, 200, 60),
+    "slouching": (60, 60, 220),
+    "away": (130, 130, 130),
+    "calibrating": (60, 160, 230),
+}
+
+
+def draw_landmarks_on_frame(frame_bgr, landmarks) -> None:
+    """Draw pose landmarks and connections onto a BGR frame in-place."""
+    if landmarks is None:
+        return
+    if mp_drawing is not None:
+        try:
+            mp_drawing.draw_landmarks(
+                frame_bgr,
+                landmarks,
+                POSE_CONNECTIONS,
+                mp_drawing_styles.get_default_pose_landmarks_style(),
+                mp_drawing_styles.get_default_pose_connections_style(),
+            )
+            return
+        except Exception:
+            pass  # Fall through to the manual cv2 renderer below.
+    h, w = frame_bgr.shape[:2]
+    for connection in POSE_CONNECTIONS:
+        a, b = connection
+        if (
+            landmarks[a].visibility < VISIBILITY_THRESHOLD
+            or landmarks[b].visibility < VISIBILITY_THRESHOLD
+        ):
+            continue
+        ax, ay = int(landmarks[a].x * w), int(landmarks[a].y * h)
+        bx, by = int(landmarks[b].x * w), int(landmarks[b].y * h)
+        cv2.line(frame_bgr, (ax, ay), (bx, by), (60, 200, 60), 1, cv2.LINE_AA)
+    for lm in landmarks:
+        if lm.visibility < VISIBILITY_THRESHOLD:
+            continue
+        x, y = int(lm.x * w), int(lm.y * h)
+        cv2.circle(frame_bgr, (x, y), 2, (40, 40, 255), -1, cv2.LINE_AA)
+
+
+def compute_debug_metrics(landmarks, ratio: Optional[float]) -> dict:
+    """Extra telemetry for the debug overlay (angles / distances / window)."""
+    metrics: dict = {}
+    if landmarks is not None:
+        left_shoulder = landmarks[_LEFT_SHOULDER]
+        right_shoulder = landmarks[_RIGHT_SHOULDER]
+        left_ear = landmarks[7]
+        right_ear = landmarks[8]
+        dx = abs(right_shoulder.x - left_shoulder.x)
+        dy = abs(right_shoulder.y - left_shoulder.y)
+        # Shoulder tilt measured against the horizontal, in degrees.
+        metrics["shoulder_slope_deg"] = (
+            round(math.degrees(math.atan2(dy, dx)), 1) if dx > MIN_SHOULDER_WIDTH else 90.0
+        )
+        # Vertical drop from the ear midpoint to the shoulder midpoint,
+        # normalized by shoulder width so it is distance-invariant.
+        shoulder_mid_y = (left_shoulder.y + right_shoulder.y) / 2.0
+        ear_mid_y = (left_ear.y + right_ear.y) / 2.0
+        ear_to_shoulder = shoulder_mid_y - ear_mid_y
+        if dx > MIN_SHOULDER_WIDTH:
+            metrics["ear_shoulder_ratio"] = round(ear_to_shoulder / dx, 4)
+        metrics["shoulder_width"] = round(dx, 4)
+    if ratio is not None:
+        metrics["ratio"] = round(ratio, 4)
+        threshold = SLOUCH_RATIO_THRESHOLD * (
+            baseline_ratio if baseline_ratio is not None else ratio
+        )
+        metrics["threshold"] = round(threshold, 4)
+        if baseline_ratio is not None:
+            metrics["baseline"] = round(baseline_ratio, 4)
+    metrics["slouch_window"] = f"{sum(slouch_frames)}/{len(slouch_frames)}"
+    return metrics
+
+
+def annotate_debug_frame(frame_bgr, landmarks, status: str):
+    """Overlay landmarks + telemetry; return (data_url, metrics) or None."""
+    annotated = frame_bgr.copy()
+    draw_landmarks_on_frame(annotated, landmarks)
+
+    label = _DEBUG_STATUS_LABELS.get(status, status.upper())
+    color = _DEBUG_STATUS_COLORS.get(status, (200, 200, 200))
+    cv2.putText(
+        annotated, label, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA
+    )
+
+    ratio = calculate_posture_ratio(landmarks) if landmarks is not None else None
+    metrics = compute_debug_metrics(landmarks, ratio)
+    threshold = metrics.get("threshold")
+    baseline = metrics.get("baseline")
+    slope = metrics.get("shoulder_slope_deg")
+    ear = metrics.get("ear_shoulder_ratio")
+
+    line2 = f"ratio={ratio:.3f}" if ratio is not None else "ratio=n/a"
+    if baseline is not None and threshold is not None:
+        line2 += f"  base={baseline:.3f}  thr={threshold:.3f}"
+    line3 = ""
+    if slope is not None:
+        line3 += f"shoulder_tilt={slope}deg"
+    if ear is not None:
+        line3 += f"  ear->shldr={ear:.3f}"
+    line3 += f"  slouch={metrics['slouch_window']}"
+    cv2.putText(
+        annotated, line2, (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+        (230, 230, 230), 1, cv2.LINE_AA,
+    )
+    cv2.putText(
+        annotated, line3, (10, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+        (200, 200, 200), 1, cv2.LINE_AA,
+    )
+
+    ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    if not ok:
         return None
-    return calculate_posture_ratio(result.pose_landmarks[0])
+    encoded = base64.b64encode(buf.tobytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}", metrics
+
+
+async def stream_debug_frame(frame_bgr, landmarks, status: str) -> None:
+    """Broadcast one annotated debug frame (no-op unless debug is enabled)."""
+    if not debug_enabled:
+        return
+    result = annotate_debug_frame(frame_bgr, landmarks, status)
+    if result is None:
+        return
+    data_url, metrics = result
+    await broadcast(
+        {"type": "debug_frame", "status": status, "data": data_url, "metrics": metrics}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +363,7 @@ async def broadcast_status(status: str) -> None:
 # ---------------------------------------------------------------------------
 async def websocket_handler(websocket) -> None:
     """Handle WebSocket connections and calibration commands."""
-    global calibrate_requested
+    global calibrate_requested, debug_enabled
 
     clients.add(websocket)
     print(f"Client connected. Total clients: {len(clients)}")
@@ -205,6 +378,9 @@ async def websocket_handler(websocket) -> None:
             if isinstance(message, dict) and message.get("command") == "calibrate":
                 print("Calibration requested by client.")
                 calibrate_requested = True
+            elif isinstance(message, dict) and message.get("command") == "debug":
+                debug_enabled = bool(message.get("enabled", False))
+                print(f"Debug streaming {'enabled' if debug_enabled else 'disabled'}.")
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -233,9 +409,11 @@ async def run_calibration(cap) -> bool:
     while len(samples) < CALIBRATION_SAMPLE_COUNT and time.monotonic() < deadline:
         ret, frame = cap.read()
         if ret:
-            ratio = frame_to_ratio(frame)
+            landmarks, ratio = frame_to_result(frame)
             if ratio is not None:
                 samples.append(ratio)
+            if debug_enabled:
+                await stream_debug_frame(frame, landmarks, "calibrating")
 
         await broadcast_status("calibrating")
         await asyncio.sleep(FRAME_DELAY_SECONDS)
@@ -300,7 +478,7 @@ async def posture_detection_loop() -> None:
                     await broadcast_status(status)
                 continue
 
-            ratio = frame_to_ratio(frame)
+            landmarks, ratio = frame_to_result(frame)
             if ratio is not None:
                 last_detection_time = now
                 status = classify_ratio(ratio)
@@ -309,6 +487,9 @@ async def posture_detection_loop() -> None:
                 status = "away"
             else:
                 status = current_status
+
+            if debug_enabled:
+                await stream_debug_frame(frame, landmarks, status)
 
             if status != current_status:
                 current_status = status

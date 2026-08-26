@@ -1,12 +1,63 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import PetDisplay from './components/PetDisplay'
+import DebugPanel, { type DebugMetrics } from './components/DebugPanel'
+import WardrobeModal from './components/WardrobeModal'
 import { Card } from './components/ui/card'
 import { Button } from './components/ui/button'
+import { ChevronUpIcon, ChevronDownIcon, XIcon, VolumeOnIcon, VolumeOffIcon, PaletteIcon } from './components/icons'
 import type { PostureData } from './types/electron'
+import type { AccessoryType } from './types/accessories'
 
+// ── XP / Leveling Configuration ────────────────────────────────────────────────
 // XP rates per tick (every 500 ms)
 const XP_GAIN  = 2  // +2 xp / tick when good
 const XP_DRAIN = 1  // -1 xp / tick when slouching
+
+/**
+ * Calculate the total cumulative XP required to reach a given level.
+ * Uses exponential scaling: RequiredXP(level) = BaseXP * level^1.5
+ * - Level 1: 100 XP total (levels 1→2)
+ * - Level 2: 100 + 100*2^1.5 ≈ 383 XP total (levels 2→3)
+ * - Level 3: 100 + 283 + 100*3^1.5 ≈ 903 XP total (levels 3→4)
+ * This makes leveling significantly harder as the pet matures, making
+ * unlocking accessories a meaningful long-term achievement.
+ */
+const XP_BASE = 100  // Base XP required for level 1→2
+const XP_EXPONENT = 1.5
+
+export function getXpRequiredForLevel(level: number): number {
+  // XP needed to go FROM (level-1) TO (level), i.e. to complete level-1 and reach level
+  return Math.floor(XP_BASE * Math.pow(level, XP_EXPONENT))
+}
+
+/** Calculate the cumulative total XP required to reach the start of a given level. */
+export function getCumulativeXpForLevel(level: number): number {
+  let total = 0
+  for (let i = 1; i < level; i++) {
+    total += getXpRequiredForLevel(i)
+  }
+  return total
+}
+
+/** Given total accumulated XP, compute the current level and progress within it. */
+export function getLevelProgress(totalXp: number): {
+  level: number
+  currentLevelXp: number  // XP progress within the current level (0 to xpRequiredForLevel)
+  xpRequired: number      // XP needed to complete this level
+  progressPercent: number  // 0-100 for the progress bar
+} {
+  let level = 1
+  while (totalXp >= getCumulativeXpForLevel(level + 1)) {
+    level++
+    // Safety cap at level 999 to prevent infinite loops
+    if (level >= 999) break
+  }
+  const cumulative = getCumulativeXpForLevel(level)
+  const currentLevelXp = totalXp - cumulative
+  const xpRequired = getXpRequiredForLevel(level)
+  const progressPercent = Math.min(100, Math.max(0, (currentLevelXp / xpRequired) * 100))
+  return { level, currentLevelXp, xpRequired, progressPercent }
+}
 
 // Posture updates are coalesced with a trailing-edge debounce so that rapid,
 // conflicting payloads (e.g. two zombie backend processes fighting over the
@@ -35,6 +86,19 @@ function parseStatus(raw: unknown): PostureStatus | null {
   return null
 }
 
+// Payload shape emitted by detector.py when debug streaming is enabled.
+interface DebugFrame {
+  type?: string
+  status?: string
+  data?: string
+  metrics?: DebugMetrics
+}
+
+/** True when a posture message is a debug_frame from the Python debug path. */
+function isDebugFrame(raw: unknown): raw is DebugFrame {
+  return !!raw && typeof raw === 'object' && (raw as DebugFrame).type === 'debug_frame'
+}
+
 // ── Pomodoro duration presets (in minutes) ──────────────────────────────────
 const WORK_PRESETS  = [25, 45, 60]
 const BREAK_PRESETS = [5, 15]
@@ -50,7 +114,7 @@ const PET_COLOR_PRESETS: { label: string; hue: number }[] = [
 // ── Web Audio chimes (native Web Audio API — zero external audio files) ─────
 /**
  * Synthesize a short chime with the Web Audio API.
- * - 'start':  a quick, uplifting ascending tone (C5 → C6) signalling that
+ * - 'start':  a quick, uplifting ascending tone (C5 -> C6) signalling that
  *             focus time has begun.
  * - 'finish': a pleasant dual-tone sequence (C6, then E6) signalling that the
  *             session is complete.
@@ -124,10 +188,46 @@ function App() {
     const parsed = saved !== null ? parseInt(saved, 10) : 0;
     return isNaN(parsed) ? 0 : parsed;
   })
-  const [level, setLevel] = useState(1)
+  // Level is derived from xp via getLevelProgress - no separate state needed
   const [mode, setMode] = useState<'dashboard' | 'taskbar'>('dashboard')
   // Pet color: CSS hue-rotate angle applied to the sprite layers (0 = default yellow/orange)
   const [petHue, setPetHue] = useState<number>(0)
+
+  // Log every mode change so the React state ↔ OS window-size sync is easy to trace.
+  // Render handshake: once React has committed the new layout, tell the main
+  // process it may safely resize the window (ui-ready) — the resize must never
+  // race ahead of the DOM. The timer is cleared on every change so a stale
+  // confirmation can never resize the window for an outdated mode.
+  useEffect(() => {
+    console.log('[renderer] mode state changed ->', mode)
+    if (!window.electronAPI?.confirmUIReady) return
+    const timer = setTimeout(() => {
+      console.log(`[renderer] confirming UI ready for mode: ${mode}`)
+      window.electronAPI.confirmUIReady(mode)
+    }, 50)
+    return () => clearTimeout(timer)
+  }, [mode])
+
+  // ── Wardrobe / accessory state ─────────────────────────────────────────────
+  const [selectedAccessory, setSelectedAccessory] = useState<AccessoryType>(() => {
+    const saved = localStorage.getItem('posturepet_accessory')
+    if (saved === 'none' || saved === 'sunglasses' || saved === 'partyhat' || saved === 'crown' || saved === 'wizardhat' || saved === 'bowtie') {
+      return saved as AccessoryType
+    }
+    return 'none'
+  })
+  const [wardrobeOpen, setWardrobeOpen] = useState(false)
+
+  // Persist accessory selection to localStorage
+  useEffect(() => {
+    localStorage.setItem('posturepet_accessory', selectedAccessory)
+  }, [selectedAccessory])
+
+  // ── Developer debug overlay state (toggled with Ctrl+Shift+D) ──────────────
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [debugFrame, setDebugFrame] = useState<string | null>(null)
+  const [debugMetrics, setDebugMetrics] = useState<DebugMetrics | null>(null)
+  const [debugStatus, setDebugStatus] = useState<PostureStatus>('unknown')
 
   // ── Pomodoro settings & timer state ─────────────────────────────────────────
   const [workDuration, setWorkDuration] = useState(45)   // minutes
@@ -179,8 +279,18 @@ function App() {
   // ── Posture listener: Electron IPC (preferred) or direct WebSocket fallback ──
   useEffect(() => {
     if (window.electronAPI) {
-      // Electron path — data arrives already parsed as PostureData
+      // Electron path — data arrives already parsed as PostureData. Debug
+      // frames (annotated JPEG + metrics) are routed to the overlay instead
+      // of the posture status pipeline.
       window.electronAPI.onPostureUpdate((data: PostureData) => {
+        if (isDebugFrame(data)) {
+          const frame = data as DebugFrame
+          setDebugFrame(frame.data ?? null)
+          setDebugMetrics(frame.metrics ?? null)
+          const s = parseStatus(frame)
+          if (s) setDebugStatus(s)
+          return
+        }
         const s = parseStatus(data)
         if (s) queueStatus(s)
       })
@@ -198,6 +308,18 @@ function App() {
       wsRef.current = ws
 
       ws.onmessage = (event) => {
+        // Structured JSON may be a debug_frame payload — route it to the
+        // debug overlay instead of the posture status pipeline.
+        try {
+          const obj = JSON.parse(event.data)
+          if (obj?.type === 'debug_frame') {
+            setDebugFrame(obj.data ?? null)
+            setDebugMetrics(obj.metrics ?? null)
+            const s = parseStatus(obj)
+            if (s) setDebugStatus(s)
+            return
+          }
+        } catch {}
         const s = parseStatus(event.data)
         if (s) queueStatus(s)
       }
@@ -216,13 +338,31 @@ function App() {
     }
   }, [queueStatus])
 
-  // ── Tray "Open Dashboard" listener ──────────────────────────────────────────
-  // The system tray sends 'set-mode' from main → renderer to restore the
-  // dashboard UI after the user chose it from the tray context menu.
+  // ── Mode change notifications from the main process ────────────────────────────
+  // The main process (tray menu, keyboard shortcut, etc.) pushes the new window
+  // mode to the renderer via the 'mode-changed' IPC channel.  This ensures the
+  // renderer always stays in sync with the actual OS window state, regardless
+  // of which code path triggered the change.
   useEffect(() => {
-    if (!window.electronAPI?.onSetMode) return
-    window.electronAPI.onSetMode((newMode) => {
-      if (newMode === 'dashboard') setMode('dashboard')
+    if (!window.electronAPI?.onModeChanged) return
+    console.log('[renderer] registering onModeChanged listener (channel: mode-changed)')
+    window.electronAPI.onModeChanged((newMode) => {
+      console.log('[renderer] received mode-changed IPC:', newMode)
+      setMode(newMode)
+    })
+  }, [])
+
+
+  // ── Force-taskbar-ui: tray "Minimize to Tray" handler ─────────────────────────
+  // The main process sends this via the dedicated 'force-taskbar-ui' IPC channel
+  // when the tray's "Minimize to Tray" shrinks the window.  It mirrors the
+  // force-restore-ui pattern for the opposite direction.
+  useEffect(() => {
+    if (!window.electronAPI?.onForceTaskbarUI) return
+    console.log('[renderer] registering onForceTaskbarUI listener (channel: force-taskbar-ui)')
+    window.electronAPI.onForceTaskbarUI(() => {
+      console.log('[renderer] received force-taskbar-ui IPC — forcing taskbar mode')
+      setMode('taskbar')
     })
   }, [])
 
@@ -238,31 +378,65 @@ function App() {
     }
   }, [])
 
-  /** Toggle between dashboard and taskbar modes */
-  const toggleMode = useCallback((newMode: 'dashboard' | 'taskbar') => {
-    setMode(newMode)
-    if (window.electronAPI?.setMode) {
-      window.electronAPI.setMode(newMode)
+  /** Send the debug-stream toggle through the active transport. */
+  const sendDebug = useCallback((enabled: boolean) => {
+    if (window.electronAPI?.setDebug) {
+      window.electronAPI.setDebug(enabled)
+      return
+    }
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ command: 'debug', enabled }))
     }
   }, [])
 
+  /** Toggle the debug overlay; mirror the state to the Python detector so it
+   *  only annotates/encodes frames while someone is actually looking. */
+  const toggleDebug = useCallback(() => {
+    setDebugOpen(prev => {
+      sendDebug(!prev)
+      if (prev) {
+        setDebugFrame(null)
+        setDebugMetrics(null)
+      }
+      return !prev
+    })
+  }, [sendDebug])
+
+  // ── Developer debug overlay: Ctrl+Shift+D ─────────────────────────────────
+  // Strictly internal inspection tool — while the overlay is closed the main
+  // dashboard is pixel-identical to a build without it.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+        e.preventDefault()
+        toggleDebug()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [toggleDebug])
+
+  /** Toggle between dashboard and taskbar modes.
+   *  Only the React state is updated here — the window resize is deferred to the
+   *  'ui-ready' render handshake (see the [mode] effect), so the OS window can
+   *  never shrink/expand before the DOM has painted the new layout. */
+  const toggleMode = useCallback((newMode: 'dashboard' | 'taskbar') => {
+    console.log(`[renderer] toggleMode -> ${newMode}`)
+    setMode(newMode)
+  }, [])
+
   // ── XP / level-up interval ──────────────────────────────────────────────────
+  // XP now uses exponential scaling. Each level requires BaseXP * level^1.5 more XP.
+  // At level 1: 100 XP per level. At level 5: ~559 XP. At level 10: ~3162 XP.
   useEffect(() => {
     const id = setInterval(() => {
       const status = postureRef.current
       if (status === 'good') {
-        setXp(prev => {
-          const next = prev + XP_GAIN
-          if (next >= 100) {
-            setLevel(l => l + 1)
-            return next - 100   // carry over remainder
-          }
-          return next
-        })
+        setXp(prev => prev + XP_GAIN)
       } else if (status === 'slouching') {
         setXp(prev => Math.max(0, prev - XP_DRAIN))
       }
-      // 'away' / 'unknown' / 'calibrating' → XP frozen
+      // 'away' / 'unknown' / 'calibrating' -> XP frozen
     }, 500)
 
     return () => clearInterval(id)
@@ -329,7 +503,7 @@ function App() {
       setIsRunning(false)
       return
     }
-    // Starting (or resuming) focus/rest → play the start chime.
+    // Starting (or resuming) focus/rest -> play the start chime.
     if (soundEnabled) playAudioChime('start')
     setIsRunning(true)
   }
@@ -365,39 +539,78 @@ function App() {
     setXp(0)
   }
 
-  // Unified RPG HUD values (xp runs 0–100 within each level)
-  const levelData = {
-    level,
-    progressPercent: Math.min(100, Math.max(0, xp)),
-    currentLevelXp: xp,
-    xpRequired: 100,
-  }
+  // Compute level and XP progress from the total accumulated XP.
+  // xp is now the CUMULATIVE total (not per-level), computed via getLevelProgress.
+  const levelData = getLevelProgress(xp)
 
   // ── Render based on mode ────────────────────────────────────────────────────
 
   if (mode === 'taskbar') {
-    // Taskbar mode: only the transparent pet container and expand control.
+    // Taskbar mode: the wrapper must fill the small Electron window exactly
+    // (w-screen h-screen) so nothing gets clipped by the window edges. Content
+    // is centered in a column — the pet circle on top, the timer below.
     return (
-      <>
-        <PetDisplay
-          mode="taskbar"
-          isWorkPhase={isWorkPhase}
-          postureStatus={postureStatus}
-          onCalibrate={sendCalibrate}
-          petHue={petHue}
-          isDead={isDead}
-          onAdoptNewPet={handleAdoptNewPet}
-        />
-        <button
-          onClick={() => toggleMode('dashboard')}
-          className="taskbar-expand-button"
-          title="Expand to dashboard"
-          aria-label="Expand to dashboard"
-          style={{ WebkitAppRegion: 'no-drag' } as any}
-        >
-          🔼
-        </button>
-      </>
+      <div className="w-screen h-screen flex flex-col items-center justify-center gap-1 overflow-hidden m-0 p-0 bg-transparent select-none">
+        {/* Pet sprite — sized to its own circle so it is never cut off */}
+        <div className="flex-shrink-0 w-[110px] h-[110px] rounded-full bg-background/70 flex items-center justify-center overflow-hidden">
+          <PetDisplay
+            mode="taskbar"
+            isWorkPhase={isWorkPhase}
+            postureStatus={postureStatus}
+            onCalibrate={sendCalibrate}
+            petHue={petHue}
+            isDead={isDead}
+            onAdoptNewPet={handleAdoptNewPet}
+            selectedAccessory={selectedAccessory}
+          />
+        </div>
+
+        {/* Timer + controls — centered below the pet */}
+        <div className="flex flex-col items-center gap-0.5 min-w-0">
+          {/* Phase label — white for legibility over the dark widget */}
+          <span className="text-[9px] font-bold text-white leading-none truncate">
+            {isWorkPhase ? 'Work' : 'Break'}
+          </span>
+
+          {/* Countdown — white for legibility over the dark widget */}
+          <span className="text-lg font-bold tabular-nums leading-none text-white">
+            {formatTime(timeLeft)}
+          </span>
+
+          {/* Controls row */}
+          <div className="flex items-center gap-1">
+            {/* Play/Pause */}
+            <button
+              onClick={handleStartPause}
+              className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center hover:opacity-80 transition-opacity"
+              title={isRunning ? 'Pause' : 'Start'}
+              aria-label={isRunning ? 'Pause' : 'Start'}
+            >
+              {isRunning ? (
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor">
+                  <rect x="1" y="0" width="2" height="8" />
+                  <rect x="5" y="0" width="2" height="8" />
+                </svg>
+              ) : (
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor">
+                  <path d="M0 0 L8 4 L0 8 Z" />
+                </svg>
+              )}
+            </button>
+
+            {/* Expand to dashboard — calls toggleMode which fires setMode IPC
+                to the main process, which resizes the window */}
+            <button
+              onClick={() => toggleMode('dashboard')}
+              className="w-6 h-6 rounded-full bg-muted text-muted-foreground flex items-center justify-center hover:bg-muted/80 transition-colors cursor-pointer"
+              title="Open Dashboard"
+              aria-label="Open Dashboard"
+            >
+              <ChevronUpIcon className="size-3" />
+            </button>
+          </div>
+        </div>
+      </div>
     )
   }
 
@@ -418,7 +631,7 @@ function App() {
             title="Minimize to taskbar"
             aria-label="Minimize to taskbar"
           >
-            🔽
+            <ChevronDownIcon />
           </Button>
           <Button
             variant="ghost"
@@ -427,7 +640,7 @@ function App() {
             title="Close"
             aria-label="Close"
           >
-            ✕
+            <XIcon />
           </Button>
         </div>
       </div>
@@ -441,7 +654,7 @@ function App() {
         <div className="w-full bg-muted rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
             <span className="text-foreground font-semibold text-lg">
-              {isWorkPhase ? '🎯 Work Time' : '☕ Rest Time'}
+              {isWorkPhase ? 'Work Time' : 'Rest Time'}
             </span>
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground text-sm">
@@ -455,7 +668,7 @@ function App() {
                 title={soundEnabled ? 'Mute chimes' : 'Unmute chimes'}
                 aria-label={soundEnabled ? 'Mute chimes' : 'Unmute chimes'}
               >
-                {soundEnabled ? '🔔' : '🔕'}
+                {soundEnabled ? <VolumeOnIcon /> : <VolumeOffIcon />}
               </Button>
             </div>
           </div>
@@ -538,31 +751,47 @@ function App() {
           </div>
         </div>
 
-        {/* Unified game-styled HUD */}
-        <div className="w-full flex flex-col gap-3 px-4 py-3 bg-white/40 rounded-xl shadow-sm border border-gray-100">
+        {/* Stats HUD: flat, handcrafted HP & XP bars */}
+        <div className="w-full flex flex-col gap-3 px-4 py-3 bg-slate-50 rounded-xl border border-slate-200">
           {/* HP Bar */}
-          <div className="flex items-center gap-3 text-sm font-bold text-red-500">
-            <span className="w-10 drop-shadow-sm">HP</span>
-            <div className="h-4 w-full bg-red-100/50 rounded-full overflow-hidden shadow-inner border border-red-200/50">
+          <div className="flex items-center justify-between gap-3">
+            <span className="w-12 shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300">HP</span>
+            <div className="h-2.5 w-full bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-red-500 to-rose-400 transition-all duration-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]"
+                className="h-full bg-red-500 rounded-full transition-all duration-300 ease-in-out"
                 style={{ width: `${health}%` }}
               />
             </div>
-            <span className="w-14 text-right">{health}/100</span>
+            <span className="shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300 tabular-nums">
+              {health}/100
+            </span>
           </div>
           {/* XP Bar */}
-          <div className="flex items-center gap-3 text-sm font-bold text-blue-600">
-            <span className="w-10 drop-shadow-sm">Lv.{levelData.level}</span>
-            <div className="h-4 w-full bg-blue-100/50 rounded-full overflow-hidden shadow-inner border border-blue-200/50">
+          <div className="flex items-center justify-between gap-3">
+            <span className="w-12 shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300">
+              Lv.{levelData.level} XP
+            </span>
+            <div className="h-2.5 w-full bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-blue-600 via-indigo-500 to-violet-500 transition-all duration-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]"
+                className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-in-out"
                 style={{ width: `${levelData.progressPercent}%` }}
               />
             </div>
-            <span className="w-14 text-right text-xs">
+            <span className="shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300 tabular-nums">
               {levelData.currentLevelXp}/{levelData.xpRequired}
             </span>
+          </div>
+          {/* Wardrobe toggle */}
+          <div className="flex items-center justify-end">
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5 text-xs"
+              onClick={() => setWardrobeOpen(true)}
+            >
+              <PaletteIcon className="size-3.5" />
+              Wardrobe
+            </Button>
           </div>
         </div>
 
@@ -574,23 +803,35 @@ function App() {
           petHue={petHue}
           isDead={isDead}
           onAdoptNewPet={handleAdoptNewPet}
+          selectedAccessory={selectedAccessory}
         />
 
-        {/* TEMPORARY DEBUG BUTTONS — remove before shipping */}
-        <div className="mt-2 flex items-center gap-2">
-          <button
-            onClick={() => setXp(prev => prev + 50)}
-            className="px-4 py-2 bg-purple-500 text-white rounded-md text-xs font-bold shadow-md hover:bg-purple-600 transition-colors"
-          >
-            Debug: +50 XP
-          </button>
-          <button
-            onClick={() => setHealth(prev => Math.max(0, prev - 25))}
-            className="px-4 py-2 bg-red-500 text-white rounded-md text-xs font-bold shadow-md hover:bg-red-600 transition-colors"
-          >
-            Debug: -25 HP
-          </button>
-        </div>
+        {/* Wardrobe modal */}
+        <WardrobeModal
+          open={wardrobeOpen}
+          petLevel={levelData.level}
+          selectedAccessory={selectedAccessory}
+          onSelect={(id) => {
+            setSelectedAccessory(id)
+            setWardrobeOpen(false)
+          }}
+          onClose={() => setWardrobeOpen(false)}
+        />
+
+        {/* Developer debug overlay — internal inspection tool opened with
+            Ctrl+Shift+D. Renders nothing when closed, so the consumer UI
+            stays pixel-identical. Also houses the throwaway +500 XP / -25 HP
+            test buttons, wired to the exact same state updates they always
+            used — they just only exist while the drawer is open. */}
+        <DebugPanel
+          open={debugOpen}
+          frame={debugFrame}
+          metrics={debugMetrics}
+          status={debugStatus}
+          onClose={toggleDebug}
+          onAddXp={() => setXp(prev => prev + 500)}
+          onDamage={() => setHealth(prev => Math.max(0, prev - 25))}
+        />
       </div>
     </Card>
   )

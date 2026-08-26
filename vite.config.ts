@@ -25,7 +25,16 @@ export default defineConfig({
         },
         vite: {
           build: {
-            outDir: 'dist-electron'
+            outDir: 'dist-electron',
+            lib: {
+              // Sandboxed Electron preloads must be CommonJS. The plugin derives
+              // the format from package.json "type" ("module" → ESM), which the
+              // sandboxed renderer silently refuses to load — killing every
+              // main→renderer IPC channel (force-taskbar-ui, mode-changed, …).
+              entry: 'electron/preload.ts',
+              formats: ['cjs'],
+              fileName: () => '[name].cjs'
+            }
           }
         }
       }

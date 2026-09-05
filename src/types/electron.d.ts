@@ -12,6 +12,8 @@ export interface ElectronAPI {
   onModeChanged: (callback: (mode: 'dashboard' | 'taskbar') => void) => void
   loadSave: () => Promise<{ health: number, xp: number }>
   writeSave: (data: { health: number, xp: number }) => void
+  /** Fire a system notification (debug menu test button). */
+  notify: (title: string, body: string) => void
 }
 
 export interface PostureData {

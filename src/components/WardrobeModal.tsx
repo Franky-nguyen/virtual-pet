@@ -2,6 +2,7 @@ import { Button } from './ui/button'
 import { XIcon, LockIcon } from './icons'
 import { ACCESSORIES, isAccessoryUnlocked } from '../types/accessories'
 import type { AccessoryType } from '../types/accessories'
+import { playPop } from '../utils/soundEffects'
 
 interface WardrobeModalProps {
   open: boolean
@@ -47,7 +48,7 @@ export default function WardrobeModal({
             variant="ghost"
             size="icon"
             className="shrink-0"
-            onClick={onClose}
+            onClick={() => { playPop(); onClose() }}
           >
             <XIcon className="size-4" />
           </Button>
@@ -59,7 +60,7 @@ export default function WardrobeModal({
           {/* None / unequip slot */}
           <button
             type="button"
-            onClick={() => onSelect('none')}
+            onClick={() => { playPop(); onSelect('none') }}
             className={`flex flex-col items-center gap-2 py-3 px-2 rounded-xl border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
               selectedAccessory === 'none'
                 ? 'border-primary bg-primary/10 ring-1 ring-primary'
@@ -82,7 +83,7 @@ export default function WardrobeModal({
                 key={accessory.id}
                 type="button"
                 disabled={locked}
-                onClick={() => !locked && onSelect(accessory.id)}
+                onClick={() => { if (!locked) { playPop(); onSelect(accessory.id) } }}
                 className={`group relative flex flex-col items-center gap-2 py-3 px-2 rounded-xl border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                   equipped
                     ? 'border-primary bg-primary/10 ring-1 ring-primary'

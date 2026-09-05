@@ -1,30 +1,36 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { execSync, spawn, spawnSync, ChildProcess } from 'node:child_process';
-import { existsSync, createWriteStream, writeFileSync } from 'node:fs';
+import { existsSync, createWriteStream, writeFileSync, readFileSync } from 'node:fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage } from 'electron'
+import { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, Notification } from 'electron'
 import WebSocket from 'ws'
 
 // ---------------------------------------------------------------------------
 // Cross-platform background process cleanup. Called on window close AND from
-// the tray "Quit PosturePet" handler — taskkill with /T kills the process tree
-// (including the detector's children), pkill -9 uses SIGKILL on POSIX.
+// the tray "Quit PosturePet" handler.
+// Uses the tracked PID from pythonProcess to kill only this app's backend,
+// never touching unrelated system processes by name.
 // ---------------------------------------------------------------------------
 const killBackgroundProcesses = () => {
-  try {
-    if (process.platform === 'win32') {
-      execSync('taskkill /F /T /IM python.exe', { stdio: 'ignore' })
-      execSync('taskkill /F /T /IM detector.exe', { stdio: 'ignore' })
-      execSync('taskkill /F /T /IM node.exe', { stdio: 'ignore' })
-    } else {
-      execSync('pkill -9 -f "detector.py"', { stdio: 'ignore' })
-      execSync('pkill -9 -f "vite"', { stdio: 'ignore' })
+  // 1. Targeted PID-tree kill via the tracked process handle — this is the
+  // primary cleanup path and covers both the bundled .exe and the python spawn.
+  if (pythonProcess && pythonProcess.pid) {
+    try {
+      execSync(`taskkill /pid ${pythonProcess.pid} /T /F`, { stdio: 'ignore' })
+    } catch (_) {
+      // Process may have already exited — not an error.
     }
-  } catch (e) {
-    // Ignore errors if processes are already dead
+  }
+  // 2. Belt-and-suspenders: image-name kill only for detector.exe, which is
+  // unique to this project (unlike python.exe / node.exe which are generic).
+  // Catches any stale instance whose PID we lost (e.g. crash + respawn).
+  try {
+    execSync('taskkill /F /T /IM detector.exe', { stdio: 'ignore' })
+  } catch (_) {
+    // No detector.exe running — ignore.
   }
 }
 
@@ -111,7 +117,17 @@ const startDetector = () => {
   if (detectorSpawned) return
   detectorSpawned = true
 
-  const logStream = createWriteStream(detectorLogPath, { flags: 'w' })
+  // Guard: createWriteStream can throw on read-only filesystems (e.g. some
+  // corporate or portable installs). If it fails, log to the console and fall
+  // back to ignoring stderr rather than crashing the function and leaving
+  // detectorSpawned=true with no process started.
+  let logStream: ReturnType<typeof createWriteStream>
+  try {
+    logStream = createWriteStream(detectorLogPath, { flags: 'w' })
+  } catch (err) {
+    console.error('[main] startDetector: could not open log file — stderr will not be captured:', err)
+    logStream = createWriteStream('/dev/null', { flags: 'w' })
+  }
 
   // Preferred: the PyInstaller-compiled binary — dev: next to this script;
   // packaged: the installer's resources folder. No Python installation
@@ -126,6 +142,7 @@ const startDetector = () => {
     pythonProcess = spawn(bundledExe, [], { stdio: ['ignore', 'ignore', 'pipe'] })
     const proc = pythonProcess
     proc.stderr?.pipe(logStream)
+    proc.on('exit', () => logStream.end())
     proc.on('error', (err) => {
       console.error('Failed to start posture detector:', err.message)
       writeFileSync(detectorLogPath, `Failed to start detector.exe: ${err.message}`)
@@ -153,6 +170,7 @@ const startDetector = () => {
   pythonProcess = spawn(pythonCmd[0], [...pythonCmd.slice(1), detectorPath], { stdio: ['ignore', 'ignore', 'pipe'] })
   const proc = pythonProcess
   proc.stderr?.pipe(logStream)
+  proc.on('exit', () => logStream.end())
   proc.on('error', (err) => {
     console.error('Failed to start posture detector:', err.message)
     writeFileSync(detectorLogPath, `Failed to start python: ${err.message}`)
@@ -171,7 +189,7 @@ if (!gotTheLock) {
   // Focus (and restore) the existing window when a second instance is launched.
   app.on('second-instance', () => {
     console.log('[main] second-instance: focusing existing window')
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       // show() covers a hidden window; moveTop() defeats Windows' foreground
       // lock, which otherwise silently ignores focus() from a background
@@ -200,6 +218,9 @@ const DASHBOARD_HEIGHT = 620
 // pet circle + timer column in src/App.tsx taskbar mode (180×180).
 const TASKBAR_SIZE = 180
 
+// Padding from the bottom-right of the work area when snapping to tray mode.
+const TASKBAR_PADDING = 20
+
 // ── Two-way window-mode bridge ───────────────────────────────────────────────
 // shrinkToTaskbar / restoreDashboard are the ONLY code paths that physically
 // resize the window, and both are driven exclusively by the renderer's
@@ -220,9 +241,9 @@ const shrinkToTaskbar = (): boolean => {
   mainWindow.setResizable(true)
   if (mainWindow.isMaximized()) mainWindow.unmaximize()
 
-  const workArea = screen.getPrimaryDisplay().workArea
-  const targetX = Math.floor(workArea.x + workArea.width - TASKBAR_SIZE)
-  const targetY = Math.floor(workArea.y + workArea.height - TASKBAR_SIZE)
+  const { workArea } = screen.getPrimaryDisplay()
+  const targetX = Math.round(workArea.x + workArea.width - TASKBAR_SIZE - TASKBAR_PADDING)
+  const targetY = Math.round(workArea.y + workArea.height - TASKBAR_SIZE - TASKBAR_PADDING)
   const targetBounds: Electron.Rectangle = {
     x: targetX,
     y: targetY,
@@ -252,7 +273,7 @@ const shrinkToTaskbar = (): boolean => {
   // setBounds can be applied asynchronously on Windows; re-apply after a tick
   // and re-lock resizing so the pet widget can't be accidentally resized.
   setTimeout(() => {
-    if (!mainWindow) return
+    if (!mainWindow || mainWindow.isDestroyed()) return
     console.log('[main] shrinkToTaskbar: re-applying bounds (async safety)')
     mainWindow.setBounds(targetBounds)
     mainWindow.setAlwaysOnTop(true, 'screen-saver')
@@ -357,10 +378,14 @@ const connectToPostureServer = () => {
 
   ws.on('error', (error) => {
     console.error('WebSocket error:', error.message)
+    // Reset so reconnect can re-spawn the detector if the backend died.
+    backendConnected = false
   })
 
   ws.on('close', () => {
     console.log('Disconnected from posture server. Retrying in 5s...')
+    // Reset so reconnect can re-spawn the detector if the backend died.
+    backendConnected = false
     // Backend never came up (direct launch, no launcher script) — start it now
     // with the OS-correct Python interpreter instead of retrying forever.
     if (!backendConnected && !detectorSpawned) {
@@ -377,7 +402,7 @@ const connectToPostureServer = () => {
 const resolveAppIcon = () => {
   const candidates = [
     path.join(__dirname, '../dist/icon.png'),       // packaged / post-build
-    path.join(__dirname, '../../public/icon.png'),  // vite dev tree
+    path.join(__dirname, '../public/icon.png'),  // vite dev tree
   ]
   return nativeImage.createFromPath(candidates.find((p) => existsSync(p)) ?? '')
 }
@@ -457,6 +482,64 @@ ipcMain.on('set-debug', (_event, enabled: boolean) => {
   }
 })
 
+// Debug menu: fire a system notification (tests the OS notification path).
+ipcMain.on('notify', (_event, title?: string, body?: string) => {
+  if (!Notification.isSupported()) {
+    console.warn('[main] notify: system notifications are not supported on this platform')
+    return
+  }
+  new Notification({
+    title: title || 'PosturePet',
+    body: body || 'Notification test from the debug menu.',
+  }).show()
+})
+
+// ── Save/Load persistence (health & XP) ──────────────────────────────────────
+// Persists pet save data to app.getPath('userData')/save-data.json in
+// packaged builds, and to the project root in dev mode (app.isPackaged is
+// false before app.whenReady, so the path is set eagerly for dev only).
+const saveDataPath = app.isPackaged
+  ? path.join(app.getPath('userData'), 'save-data.json')
+  : path.join(__dirname, '..', 'save-data.json')
+
+const isValidSave = (raw: unknown): raw is { health: number; xp: number } =>
+  typeof raw === 'object' &&
+  raw !== null &&
+  typeof (raw as any).health === 'number' &&
+  Number.isFinite((raw as any).health) &&
+  typeof (raw as any).xp === 'number' &&
+  Number.isFinite((raw as any).xp)
+
+ipcMain.handle('load-save', async () => {
+  try {
+    if (existsSync(saveDataPath)) {
+      const raw = readFileSync(saveDataPath, 'utf8')
+      const parsed = JSON.parse(raw)
+      if (isValidSave(parsed)) {
+        return { health: parsed.health, xp: parsed.xp }
+      }
+      console.warn('[main] load-save: save file has invalid shape — ignoring:', parsed)
+    }
+  } catch (err) {
+    console.error('[main] load-save: failed to read save file:', err)
+  }
+  // Corrupt or missing — renderer falls back to its own defaults (health:100, xp:0).
+  return null
+})
+
+ipcMain.on('write-save', (_event, data: unknown) => {
+  if (!isValidSave(data)) {
+    console.error('[main] write-save: rejected invalid data shape:', data)
+    return
+  }
+  // Write only the two validated fields — no arbitrary keys.
+  try {
+    writeFileSync(saveDataPath, JSON.stringify({ health: data.health, xp: data.xp }, null, 2), 'utf8')
+  } catch (err) {
+    console.error('[main] write-save: failed to write save file:', err)
+  }
+})
+
 app.whenReady().then(() => {
   // A duplicate instance that failed the lock must quit WITHOUT creating
   // anything — no window, no tray — so it can't leak a renderer process or
@@ -489,6 +572,7 @@ app.whenReady().then(() => {
           // 2. Unconditionally wait 150ms for Chromium to un-throttle the
           // renderer before asking React to transition the UI.
           setTimeout(() => {
+            if (!win || win.isDestroyed()) return
             console.log('[IPC] Sending force-taskbar-ui to renderer')
             win.webContents.send('force-taskbar-ui')
           }, 150)

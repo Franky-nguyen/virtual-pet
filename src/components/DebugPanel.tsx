@@ -122,6 +122,13 @@ export default function DebugPanel({ open, frame, metrics, status, onClose, onAd
           >
             Debug: -25 HP
           </button>
+          <button
+            type="button"
+            onClick={() => window.electronAPI?.notify('PosturePet', 'Notification test from the debug menu.')}
+            className="rounded border border-slate-600 bg-slate-800 px-2.5 py-1 font-mono text-[11px] text-amber-300 hover:bg-slate-700 transition-colors"
+          >
+            Debug: Notification
+          </button>
         </div>
       </div>
     </div>

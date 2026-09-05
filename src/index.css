@@ -43,6 +43,14 @@ button, input {
   animation: play-sprite calc(var(--frames) * 0.15s) steps(var(--frames)) infinite;
 }
 
+/* When a shared animation clock parent (.sync-clock) drives the timing,
+   child sprite layers inherit the parent's single CSS animation clock.
+   This guarantees zero drift between the base dog and the accessory overlay —
+   they step through frames at the exact same millisecond. */
+.sync-clock > .sprite-base {
+  animation: inherit !important;
+}
+
 @keyframes play-sprite {
   from { background-position: 0px 0px; }
   to { background-position: calc(-1 * var(--frames) * var(--frame-size)) 0px; }
@@ -62,6 +70,67 @@ button, input {
 @keyframes play-walk {
   from { background-position: 0px 0px; }
   to   { background-position: -288px 0px; }
+}
+
+/* Death sprite: loops the death sheet continuously, exactly like the other
+   sprite layers.  The freeze-on-final-frame is handled in PetDisplay via an
+   inline `animation: 'none'` + explicit background-position once `deathFrozen`
+   is set (one full cycle after the pet dies).  We loop here instead of using a
+   one-shot `forwards` animation because a finite animation's final keyframe
+   offset lands PAST the last tile (a blank region), which made the dog vanish
+   instead of resting on its final frame. */
+.death-sprite {
+  width: var(--frame-size);
+  height: var(--frame-size);
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  background-repeat: no-repeat;
+  background-position: 0px 0px;
+  background-size: calc(var(--frames) * var(--frame-size)) var(--frame-size);
+  animation: play-sprite calc(var(--frames) * 0.15s) steps(var(--frames)) infinite;
+}
+
+/* Evolution glow: a soft, smooth brightness pulse applied to the sprite
+   container wrapper while isEvolving is true.  The pulse runs on a 1.2s cycle
+   — synchronized with the one-shot evolution sprite — so the pet gently glows
+   up and back down once as it transforms.  This replaces the old 0.1s invert
+   strobe, which read as a harsh flicker rather than a smooth evolution.
+   IMPORTANT: this animation only touches `filter` — it must NEVER touch
+   background-position, background-size, width, height, or opacity. */
+.evolution-blink {
+  animation: evolution-glow 1.2s ease-in-out infinite;
+}
+
+@keyframes evolution-glow {
+  0%, 100% { filter: brightness(1) saturate(1); }
+  50%      { filter: brightness(1.8) saturate(1.4); }
+}
+
+/* Evolution one-shot: evolution.png is a 512×64 strip (8 frames × 64px tiles).
+   All tiles are animated (no static "settled" frame at the end).
+   background-size is set inline via --evo-sheet-px so it matches each specific
+   sheet's total width (evolved idle/hurt/attack/death = 384px, evolution = 512px).
+   The keyframe end position is -512px: 8 steps × 64px per frame = 512px total shift.
+   Duration must stay in sync with EVOLUTION_DURATION_MS in src/types/accessories.ts. */
+.evolution-sprite {
+  width: 64px;
+  height: 64px;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  background-repeat: no-repeat;
+  background-position: 0px 0px;
+  background-size: var(--evo-sheet-px, 512px) 64px;
+  animation: play-evolution 1.2s steps(8) 1 forwards;
+}
+
+@keyframes play-evolution {
+  from { background-position: 0px 0px; }
+  /* 8 frames × 64px per frame = 512px total shift.
+     steps(8) divides 1.2s into 8 equal intervals, one step per 150ms.
+     After step 8 the animation holds the final frame (tile 7, 0-indexed). */
+  to   { background-position: -512px 0px; }
 }
 
 /* Hurt layer: sprite playback + red flash + shake. Applied unconditionally to
@@ -190,6 +259,14 @@ button, input {
   * {
     @apply border-border outline-ring;
   }
+
+  /* ── Pixel-art / retro UI: all buttons blocky (small corner radius) ── */
+  button {
+    border-radius: 3px !important;
+  }
+  input[type="range"] {
+    border-radius: 3px !important;
+  }
   body {
     @apply bg-background text-foreground;
   }
@@ -220,4 +297,170 @@ button, input {
 .no-scrollbar {
   -ms-overflow-style: none;  /* IE and Edge */
   scrollbar-width: none;     /* Firefox */
+}
+
+/* ── Tactile 3D + modern smooth button treatment ──────────────────────────
+   Applied via `.btn-tactile` (see src/components/ui/button.tsx). Every Button
+   gets it except the Evolve button, which opts out with `tactile={false}`.
+   Depth color/size are injected per-variant/per-size through the
+   `--tactile-depth` / `--tactile-depth-color` custom properties. */
+.btn-tactile {
+  --tactile-depth: 5px;
+  --tactile-depth-color: color-mix(in oklab, var(--primary) 60%, black);
+
+  position: relative;
+  border-radius: 9999px;
+  transform: translateY(0);
+  box-shadow:
+    0 var(--tactile-depth) 0 var(--tactile-depth-color),
+    0 4px 10px rgba(0, 0, 0, 0.12);
+  transition:
+    transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    opacity 0.18s ease;
+  animation: btn-move-in 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+}
+
+.btn-tactile:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow:
+    0 calc(var(--tactile-depth) + 2px) 0 var(--tactile-depth-color),
+    0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
+.btn-tactile:active:not(:disabled) {
+  transform: translateY(var(--tactile-depth));
+  box-shadow:
+    0 0 0 var(--tactile-depth-color),
+    0 1px 3px rgba(0, 0, 0, 0.1);
+  transition-duration: 0.05s;
+}
+
+.btn-tactile:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 3px var(--ring),
+    0 var(--tactile-depth) 0 var(--tactile-depth-color),
+    0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+/* Expanding/fading hover pulse ring */
+.btn-tactile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 40%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.btn-tactile:active::after {
+  animation: btn-pulse 0.5s ease-out;
+}
+
+@keyframes btn-pulse {
+  from { opacity: 0.6; box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 40%, transparent); }
+  to   { opacity: 0;   box-shadow: 0 0 0 10px color-mix(in oklab, var(--primary) 40%, transparent); }
+}
+
+@keyframes btn-move-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Evolution cinematic: spotlight dim, swirling particles, flash ──────── */
+/* Full-screen overlay that dims the app to a dark vignette while a transparent
+   "spotlight" hole is cut at the pet's position (via the radial-gradient
+   background injected inline from the measured pet center). */
+.evolve-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: auto;          /* blocks interaction with the dashboard */
+  transition: opacity 0.4s ease;
+}
+
+/* Glowing spotlight ring around the pet's container. */
+.evolve-spotlight {
+  position: absolute;
+  width: 150px;
+  height: 150px;
+  margin: -75px 0 0 -75px;       /* centers the ring on the injected left/top */
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.65);
+  box-shadow:
+    0 0 30px 8px rgba(255, 220, 130, 0.55),
+    inset 0 0 30px 6px rgba(255, 255, 255, 0.12);
+  animation: evolve-spotlight-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes evolve-spotlight-pulse {
+  0%, 100% { opacity: 0.75; transform: scale(1); }
+  50%      { opacity: 1;    transform: scale(1.06); }
+}
+
+/* Bright white/gold flash that bursts as the particles converge. */
+.evolve-flash {
+  position: absolute;
+  width: 180px;
+  height: 180px;
+  margin: -90px 0 0 -90px;
+  border-radius: 50%;
+  background: radial-gradient(circle,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(255, 230, 150, 0.75) 35%,
+    rgba(255, 200, 80, 0) 70%);
+  animation: evolve-flash 1.2s ease-out forwards;
+}
+
+@keyframes evolve-flash {
+  0%   { opacity: 0; transform: scale(0.4); }
+  25%  { opacity: 1; transform: scale(0.9); }
+  100% { opacity: 0; transform: scale(1.7); }
+}
+
+/* A single solid-colored light. Its `offset-path` (tornado spiral) and the two
+   animations (explosion burst → tornado) are injected inline per light. */
+.evolve-particle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 50%;
+  offset-rotate: 0deg;
+  will-change: transform, offset-distance, opacity;
+}
+
+/* Explosion: burst from the Evolve button outward to a random scatter point
+   across the UI (slight overshoot), hold, then reel back to the button ready
+   for the tornado. Only touches `transform` — opacity is handled by the
+   tornado animation so the two never fight over the same property. */
+@keyframes evolve-explode {
+  0%   { transform: translate(0, 0) scale(0.5); }
+  40%  { transform: translate(var(--ex, 0px), var(--ey, 0px)) scale(1.15); }
+  58%  { transform: translate(var(--ex, 0px), var(--ey, 0px)) scale(1); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+/* Tornado: follow the shared spiral path into the pet, fading out only at the
+   moment it merges into the center. */
+@keyframes evolve-tornado {
+  0%   { offset-distance: 0%; opacity: 1; }
+  92%  { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+/* Spotlight shake — applied to the ring around the pet at explosion time and
+   again at the climax for impact. */
+@keyframes evolve-shake {
+  0%, 100% { transform: translate(0, 0); }
+  15% { transform: translate(-7px, 4px); }
+  30% { transform: translate(6px, -5px); }
+  45% { transform: translate(-5px, -4px); }
+  60% { transform: translate(5px, 4px); }
+  75% { transform: translate(-3px, 2px); }
+  90% { transform: translate(2px, -2px); }
 }

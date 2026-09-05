@@ -21,7 +21,7 @@ export type AccessoryId = AccessoryType
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** All possible animation states for the pet sprite. */
-export type AnimationState = 'Idle' | 'Walk' | 'Hurt' | 'Death'
+export type AnimationState = 'Idle' | 'Walk' | 'Hurt' | 'Death' | 'Attack' | 'Evolution'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Accessory metadata (for wardrobe / UI)
@@ -107,14 +107,61 @@ export const ACCESSORY_FILENAME_MAP: Record<AccessoryType, string> = {
 /**
  * All valid animation states in display order.
  */
-export const ANIMATION_STATES: AnimationState[] = ['Idle', 'Walk', 'Hurt', 'Death']
+export const ANIMATION_STATES: AnimationState[] = ['Idle', 'Walk', 'Hurt', 'Death', 'Attack', 'Evolution']
 
 /**
- * Frame counts per animation. Used to set CSS `--frames` custom property.
+ * Frame counts per animation (base dog sheets). Used to set CSS `--frames` custom property.
+ * Note: Walk is special-cased in CSS (`.walk-sprite` renders its real 6 frames).
  */
 export const ANIMATION_FRAMES: Record<AnimationState, number> = {
   Idle: 4,
   Walk: 4,
   Hurt: 2,
   Death: 4,
+  Attack: 4,
+  Evolution: 7,
 } as const
+
+/**
+ * Frame counts per animation for the EVOLVED (Level 10) adult dog sheets in
+ * `src/assets/pets/evolved/`.  All sheets (base AND accessorized) are uniform
+ * 64×64px tiles on a 64px-high strip:
+ *   - idle.png      384×64 → 6 frames
+ *   - walk.png      512×64 → 8 frames
+ *   - hurt.png      192×64 → 3 frames
+ *   - attack.png    256×64 → 4 frames
+ *   - death.png     384×64 → 6 frames
+ *   - evolution.png 512×64 → 8 frames (plays all 8; 8th tile = settled pose)
+ */
+export const EVOLVED_ANIMATION_FRAMES: Record<AnimationState, number> = {
+  Idle: 6,
+  Walk: 8,
+  Hurt: 3,
+  Death: 6,
+  Attack: 4,
+  Evolution: 8,
+} as const
+
+/** Frame tile size in pixels for all EVOLVED adult dog sheets (64×64 px per tile). */
+export const EVOLVED_TILE_PX = 64
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evolution (Level 10) configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** XP level at which the pet evolves into its permanent evolved form. */
+export const EVOLUTION_LEVEL = 10
+
+/** Milliseconds per sprite frame — must stay in sync with `.sprite-base` (0.15s). */
+export const EVOLUTION_FRAME_MS = 150
+
+/** Number of frames in the evolution animation (evolution.png = 8 frames). */
+export const EVOLUTION_ANIMATION_FRAMES = EVOLVED_ANIMATION_FRAMES['Evolution']
+
+/** Total duration of the one-time evolution animation (8 × 150ms = 1.2s).
+ *  Must match `.evolution-sprite` in src/index.css. */
+export const EVOLUTION_DURATION_MS = EVOLUTION_ANIMATION_FRAMES * EVOLUTION_FRAME_MS
+
+/** Duration of the pre-evolution Pokémon-style blink flash (2.5s).
+ *  Must match `.evolution-blink` in src/index.css. */
+export const EVOLUTION_BLINK_MS = 2500

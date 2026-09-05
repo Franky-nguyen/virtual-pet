@@ -7,6 +7,9 @@ import { Button } from './components/ui/button'
 import { ChevronUpIcon, ChevronDownIcon, XIcon, VolumeOnIcon, VolumeOffIcon, PaletteIcon } from './components/icons'
 import type { PostureData } from './types/electron'
 import type { AccessoryType } from './types/accessories'
+import { ANIMATION_FRAMES, EVOLVED_ANIMATION_FRAMES, EVOLUTION_FRAME_MS } from './types/accessories'
+import { playStart, playReset, playCalibrate, playPop, playToggle } from './utils/soundEffects'
+import { playBGM, pauseBGM, skipTrack, setVolume, getVolume } from './utils/bgm'
 
 // ── XP / Leveling Configuration ────────────────────────────────────────────────
 // XP rates per tick (every 500 ms)
@@ -111,63 +114,6 @@ const PET_COLOR_PRESETS: { label: string; hue: number }[] = [
   { label: 'Pink',     hue: 280 },
 ]
 
-// ── Web Audio chimes (native Web Audio API — zero external audio files) ─────
-/**
- * Synthesize a short chime with the Web Audio API.
- * - 'start':  a quick, uplifting ascending tone (C5 -> C6) signalling that
- *             focus time has begun.
- * - 'finish': a pleasant dual-tone sequence (C6, then E6) signalling that the
- *             session is complete.
- * Each call builds its own AudioContext so the chime is fully self-contained
- * and garbage-collected right after it finishes.
- */
-function playAudioChime(type: 'start' | 'finish') {
-  try {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
-    const now = ctx.currentTime
-
-    if (type === 'start') {
-      // Uplifting rising note sequence
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(523.25, now) // C5
-      osc.frequency.exponentialRampToValueAtTime(1046.5, now + 0.25) // C6
-      gain.gain.setValueAtTime(0.12, now)
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35)
-      osc.connect(gain)
-      gain.connect(ctx.destination)
-      osc.start(now)
-      osc.stop(now + 0.35)
-    } else {
-      // Completion chime sequence
-      const osc1 = ctx.createOscillator()
-      const gain1 = ctx.createGain()
-      osc1.type = 'sine'
-      osc1.frequency.setValueAtTime(1046.5, now)
-      gain1.gain.setValueAtTime(0.15, now)
-      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.6)
-      osc1.connect(gain1)
-      gain1.connect(ctx.destination)
-      osc1.start(now)
-      osc1.stop(now + 0.6)
-
-      const osc2 = ctx.createOscillator()
-      const gain2 = ctx.createGain()
-      osc2.type = 'sine'
-      osc2.frequency.setValueAtTime(1318.5, now + 0.15)
-      gain2.gain.setValueAtTime(0.15, now + 0.15)
-      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.8)
-      osc2.connect(gain2)
-      gain2.connect(ctx.destination)
-      osc2.start(now + 0.15)
-      osc2.stop(now + 0.8)
-    }
-  } catch (e) {
-    console.error('Audio playback failed', e)
-  }
-}
-
 /** Format a seconds count as MM:SS. */
 const formatTime = (seconds: number) => {
   const mins = Math.floor(seconds / 60)
@@ -233,6 +179,7 @@ function App() {
   const [workDuration, setWorkDuration] = useState(45)   // minutes
   const [breakDuration, setBreakDuration] = useState(5)  // minutes
   const [soundEnabled, setSoundEnabled] = useState(true)
+  const [bgmVolume, setBgmVolume] = useState(() => getVolume())
   const [timeLeft, setTimeLeft] = useState(45 * 60)      // seconds
   const [isRunning, setIsRunning] = useState(false)
 
@@ -275,6 +222,20 @@ function App() {
   // Ref so the health interval always reads the latest HP without stale closure
   const healthRef = useRef(health)
   useEffect(() => { healthRef.current = health }, [health])
+
+  // ── Evolution (Level 10) tracking ─────────────────────────────────────────
+  // isEvolved is persisted so the one-time evolution permanently survives
+  // restarts. isEvolving is transient — it only lives for the 1.05s animation.
+  const [isEvolved, setIsEvolved] = useState<boolean>(() => localStorage.getItem('pet-evolved') === '1')
+  const [isEvolving, setIsEvolving] = useState(false)
+
+  // Persist the evolved flag immediately (same pattern as health/xp saves).
+  useEffect(() => {
+    localStorage.setItem('pet-evolved', isEvolved ? '1' : '0')
+  }, [isEvolved])
+
+  // Holds the evolution timer so it can be cancelled on adopt.
+  const evolutionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Posture listener: Electron IPC (preferred) or direct WebSocket fallback ──
   useEffect(() => {
@@ -368,6 +329,7 @@ function App() {
 
   /** Send the calibration command through the active transport. */
   const sendCalibrate = useCallback(() => {
+    playCalibrate()
     if (window.electronAPI) {
       window.electronAPI.calibratePosture()
       return
@@ -479,16 +441,18 @@ function App() {
     return () => clearInterval(id)
   }, [isRunning])
 
-  /** Finish the current phase: play the completion chime, stop the timer, and
+  /** Finish the current phase: stop the timer, award XP, and
    *  switch to the other phase pre-loaded with its full configured duration. */
   const completePhase = useCallback(() => {
     setIsRunning(false)
+    pauseBGM()
     const nextIsWork = !isWorkPhase
-    if (soundEnabled) playAudioChime('finish')
     setXp(prev => prev + 25) // XP reward for completing a phase
     setIsWorkPhase(nextIsWork)
     setTimeLeft((nextIsWork ? workDuration : breakDuration) * 60)
-  }, [isWorkPhase, workDuration, breakDuration, soundEnabled])
+    // Trigger the pet's notification attack animation (works for both puppy and evolved dog)
+    window.dispatchEvent(new CustomEvent('pet:notify'))
+  }, [isWorkPhase, workDuration, breakDuration])
 
   // When the countdown hits 0 while running, complete the phase.
   useEffect(() => {
@@ -500,27 +464,33 @@ function App() {
   // ── Timer controls ──────────────────────────────────────────────────────────
   const handleStartPause = () => {
     if (isRunning) {
+      if (soundEnabled) playPop()
+      pauseBGM()
       setIsRunning(false)
       return
     }
-    // Starting (or resuming) focus/rest -> play the start chime.
-    if (soundEnabled) playAudioChime('start')
+    if (soundEnabled) playStart()
+    playBGM()
     setIsRunning(true)
   }
 
   const handleReset = () => {
+    playReset()
+    pauseBGM()
     setIsRunning(false)
     setTimeLeft((isWorkPhase ? workDuration : breakDuration) * 60)
   }
 
   /** Apply a work preset; refresh the countdown immediately when idle. */
   const handleSelectWorkDuration = (minutes: number) => {
+    playPop()
     setWorkDuration(minutes)
     if (!isRunning && isWorkPhase) setTimeLeft(minutes * 60)
   }
 
   /** Apply a break preset; refresh the countdown immediately when idle. */
   const handleSelectBreakDuration = (minutes: number) => {
+    playPop()
     setBreakDuration(minutes)
     if (!isRunning && !isWorkPhase) setTimeLeft(minutes * 60)
   }
@@ -533,15 +503,71 @@ function App() {
   // survives application restarts.
   const isDead = health <= 0
 
-  /** Adopt a new dog: restore full HP and XP; the save effect writes it to storage. */
+  /** Adopt a new dog: restore full HP and XP; the save effect writes it to storage.
+   *  A newly adopted dog starts in its base form and can evolve again. */
   const handleAdoptNewPet = () => {
     setHealth(100)
     setXp(0)
+    setIsEvolved(false)
+    setIsEvolving(false)
+    if (evolutionTimerRef.current) {
+      clearTimeout(evolutionTimerRef.current)
+      evolutionTimerRef.current = null
+    }
   }
+
+  // ── Death animation freeze ────────────────────────────────────────────────
+  // The Death layer loops its sprite (`.death-sprite` is `infinite`), so we
+  // can't rely on an `animationend` event (infinite loops never fire it).  We
+  // time the freeze to exactly one full cycle (frames × 150ms) after the pet
+  // dies, then pin the Death sprite on its final frame forever.
+  const [deathFrozen, setDeathFrozen] = useState(false)
+
+  useEffect(() => {
+    if (!isDead) {
+      setDeathFrozen(false)
+      return
+    }
+    const frames = isEvolved ? EVOLVED_ANIMATION_FRAMES.Death : ANIMATION_FRAMES.Death
+    const timer = setTimeout(() => setDeathFrozen(true), frames * EVOLUTION_FRAME_MS)
+    return () => clearTimeout(timer)
+  }, [isDead, isEvolved])
 
   // Compute level and XP progress from the total accumulated XP.
   // xp is now the CUMULATIVE total (not per-level), computed via getLevelProgress.
   const levelData = getLevelProgress(xp)
+
+  // ── Level 10 evolution — manual trigger ───────────────────────────────────
+  // The pet reaches Level 10 passively through XP, but the evolution is
+  // USER-initiated via the "Evolve" button. The sequence is:
+  //   t=0ms     setIsEvolving(true)  — blink starts, evolution layer mounts
+  //   t=2500ms  blink ends           — blink animation stops
+  //   t=3700ms  animationend fires   — handleEvolutionAnimEnd → isEvolving=false,
+  //                                      isEvolved=true (both in same React batch)
+  const triggerEvolution = () => {
+    if (isEvolved || isEvolving) return
+    // The trigger arpeggio is played by PetDisplay's handleEvolveClick (the
+    // chiptune cue), so no keystroke sound is needed here.
+    // Cancel any stale timer from a previous interrupted evolution
+    if (evolutionTimerRef.current) {
+      clearTimeout(evolutionTimerRef.current)
+      evolutionTimerRef.current = null
+    }
+    setIsEvolving(true)
+    // animationend (PetDisplay) fires at BLINK_MS + DURATION_MS = 3700ms and
+    // sets BOTH isEvolving=false AND isEvolved=true in the same batch.
+  }
+
+  // Called by PetDisplay's animationend handler the instant the 1.2s evolution
+  // sprite animation finishes. This is the authoritative end-of-animation signal —
+  // no setTimeout drift, no race conditions, pixel-accurate to the CSS clock.
+  // We set BOTH isEvolving=false AND isEvolved=true here, in the same batch, so
+  // the puppy sprite never re-appears: as soon as the blink wrapper unmounts
+  // (opacity-0) the adult sprite layers are already active (isEvolved=true).
+  const handleEvolutionAnimEnd = () => {
+    setIsEvolving(false)
+    setIsEvolved(true)
+  }
 
   // ── Render based on mode ────────────────────────────────────────────────────
 
@@ -562,6 +588,12 @@ function App() {
             isDead={isDead}
             onAdoptNewPet={handleAdoptNewPet}
             selectedAccessory={selectedAccessory}
+            isEvolving={isEvolving}
+            isEvolved={isEvolved}
+            deathFrozen={deathFrozen}
+            petLevel={levelData.level}
+            onEvolve={triggerEvolution}
+            onEvolutionAnimEnd={handleEvolutionAnimEnd}
           />
         </div>
 
@@ -627,7 +659,7 @@ function App() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => toggleMode('taskbar')}
+            onClick={() => { playToggle(); toggleMode('taskbar') }}
             title="Minimize to taskbar"
             aria-label="Minimize to taskbar"
           >
@@ -636,7 +668,7 @@ function App() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => window.close()}
+            onClick={() => { playToggle(); window.close() }}
             title="Close"
             aria-label="Close"
           >
@@ -664,7 +696,7 @@ function App() {
                 variant="ghost"
                 size="icon"
                 className="size-7"
-                onClick={() => setSoundEnabled(s => !s)}
+                onClick={() => { playToggle(); setSoundEnabled(s => !s) }}
                 title={soundEnabled ? 'Mute chimes' : 'Unmute chimes'}
                 aria-label={soundEnabled ? 'Mute chimes' : 'Unmute chimes'}
               >
@@ -727,7 +759,7 @@ function App() {
                   <button
                     key={hue}
                     type="button"
-                    onClick={() => setPetHue(hue)}
+                    onClick={() => { playPop(); setPetHue(hue) }}
                     title={label}
                     aria-label={`Pet color: ${label}`}
                     className={`size-6 rounded-full border transition-transform hover:scale-110 ${
@@ -747,6 +779,43 @@ function App() {
             </Button>
             <Button variant="secondary" className="px-6" onClick={handleReset}>
               Reset
+            </Button>
+          </div>
+
+          {/* BGM cluster: volume slider + skip */}
+          <div className="flex items-center gap-2 mt-3">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-muted-foreground">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+            </svg>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={bgmVolume}
+              onChange={e => {
+                const v = parseFloat(e.target.value)
+                setBgmVolume(v)
+                setVolume(v)
+              }}
+              className="flex-1 h-1 accent-primary cursor-pointer"
+              aria-label="BGM volume"
+              title={`Volume: ${Math.round(bgmVolume * 100)}%`}
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0"
+              onClick={() => { playPop(); skipTrack() }}
+              title="Skip track"
+              aria-label="Skip track"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="5 4 15 12 5 20 5 4" />
+                <line x1="19" y1="5" x2="19" y2="19" />
+              </svg>
             </Button>
           </div>
         </div>
@@ -787,7 +856,7 @@ function App() {
               size="sm"
               variant="outline"
               className="gap-1.5 text-xs"
-              onClick={() => setWardrobeOpen(true)}
+              onClick={() => { playToggle(); setWardrobeOpen(true) }}
             >
               <PaletteIcon className="size-3.5" />
               Wardrobe
@@ -804,6 +873,12 @@ function App() {
           isDead={isDead}
           onAdoptNewPet={handleAdoptNewPet}
           selectedAccessory={selectedAccessory}
+          isEvolving={isEvolving}
+          isEvolved={isEvolved}
+          deathFrozen={deathFrozen}
+          petLevel={levelData.level}
+          onEvolve={triggerEvolution}
+          onEvolutionAnimEnd={handleEvolutionAnimEnd}
         />
 
         {/* Wardrobe modal */}

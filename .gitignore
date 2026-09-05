@@ -12,9 +12,20 @@ build_env/
 *.exe
 detector.spec
 
-# ── Python cache ─────────────────────────────────────────────
+# ── Python ───────────────────────────────────────────────────
+venv/
+.venv/
+env/
 __pycache__/
 *.py[cod]
+
+# ── TypeScript build info ────────────────────────────────────
+*.tsbuildinfo
+
+# ── Environment variables ────────────────────────────────────
+.env
+.env.*
+!.env.example
 
 # ── Logs ─────────────────────────────────────────────────────
 *.log

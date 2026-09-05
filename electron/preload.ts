@@ -45,5 +45,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Persistent save file (health & XP)
   loadSave: () => ipcRenderer.invoke('load-save'),
-  writeSave: (data: any) => ipcRenderer.send('write-save', data)
+  writeSave: (data: any) => ipcRenderer.send('write-save', data),
+
+  // System notification (debug menu test button)
+  notify: (title: string, body: string) => {
+    ipcRenderer.send('notify', title, body)
+  }
 })

@@ -18,7 +18,7 @@ body {
   user-select: none;
 }
 
-button, input {
+button, input, select, label, textarea {
   -webkit-app-region: no-drag;
 }
 

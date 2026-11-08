@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('calibrate-posture')
   },
 
+  // UC-4 Wellness Mode: ask the detector to power the camera down entirely.
+  // The backend releases its VideoCapture handle, so no frames are captured.
+  setCapture: (enabled: boolean) => {
+    ipcRenderer.send('set-capture', enabled)
+  },
+
   // Developer debug overlay (Ctrl+Shift+D): toggle annotated-frame streaming
   // from the Python detector. No-op in browsers (the fallback connects
   // directly to the WebSocket and sends the same command itself).
@@ -43,6 +49,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('mode-changed', (_event, mode) => callback(mode))
   },
 
+  // P1 (Ctrl+Alt+H): the window was hidden to the system tray. The renderer
+  // pauses the webcam, the Pomodoro timer and BGM while it is hidden.
+  onAppHidden: (callback: () => void) => {
+    ipcRenderer.on('app-hidden', () => callback())
+  },
+
+  // P1: the window was restored from the tray. The renderer restores the camera
+  // (unless Wellness Mode is on) and resumes the Pomodoro timer if it was
+  // running when the window was hidden.
+  onAppRestored: (callback: () => void) => {
+    ipcRenderer.on('app-restored', () => callback())
+  },
+
   // Persistent save file (health & XP)
   loadSave: () => ipcRenderer.invoke('load-save'),
   writeSave: (data: any) => ipcRenderer.send('write-save', data),
@@ -50,5 +69,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System notification (debug menu test button)
   notify: (title: string, body: string) => {
     ipcRenderer.send('notify', title, body)
-  }
+  },
+
+  // Custom Pet Pack runtime methods
+  listCustomPets: () => ipcRenderer.invoke('custom-pets:list'),
+  getCustomPet: (petId: string) => ipcRenderer.invoke('custom-pets:get', petId),
+  createCustomPet: (request: any) => ipcRenderer.invoke('custom-pets:create', request),
+  importCustomPetDirectory: (meta?: any) => ipcRenderer.invoke('custom-pets:import-directory', meta),
+  importFixturePet: (meta?: any) => ipcRenderer.invoke('custom-pets:import-fixture', meta),
+  deleteCustomPet: (petId: string) => ipcRenderer.invoke('custom-pets:delete', petId),
+  onCustomPetProgress: (callback: (progress: any) => void) => {
+    const handler = (_event: any, progress: any) => callback(progress)
+    ipcRenderer.on('custom-pets:progress', handler)
+    return () => {
+      ipcRenderer.removeListener('custom-pets:progress', handler)
+    }
+  },
 })

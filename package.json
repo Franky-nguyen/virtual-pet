@@ -1,7 +1,9 @@
 {
   "name": "posture-pet",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.0.0",
+  "description": "PosturePet 2.0 — Desktop Virtual Pet & Posture Companion",
+  "author": "PosturePet Team",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -49,7 +51,10 @@
   },
   "build": {
     "appId": "com.posturepet.app",
-    "productName": "PosturePet",
+    "productName": "PosturePet 2.0",
+    "asar": true,
+    "compression": "maximum",
+    "removePackageScripts": true,
     "files": [
       "dist/**/*",
       "dist-electron/**/*"
@@ -58,10 +63,23 @@
       {
         "from": "detector.exe",
         "to": "detector.exe"
+      },
+      {
+        "from": "fixtures/mochi-cat-pack",
+        "to": "fixtures/mochi-cat-pack"
       }
     ],
     "win": {
       "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PosturePet 2.0",
+      "artifactName": "PosturePet-2.0-Setup.${ext}"
     },
     "directories": {
       "output": "release"

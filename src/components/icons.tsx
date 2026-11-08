@@ -104,3 +104,27 @@ export function LockIcon({ className }: IconProps) {
     </svg>
   )
 }
+
+export function SparkleIcon({ className }: IconProps) {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z" />
+    </svg>
+  )
+}
+
+export function FlowerIcon({ className }: IconProps) {
+  return (
+    <svg {...svgProps(className)}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2C12 2 12 6 12 9" />
+      <path d="M12 15C12 15 12 18 12 22" />
+      <path d="M2 12C2 12 6 12 9 12" />
+      <path d="M15 12C15 12 18 12 22 12" />
+      <path d="M4.93 4.93C4.93 4.93 7.76 7.76 9.88 9.88" />
+      <path d="M14.12 14.12C14.12 14.12 16.95 16.95 19.07 19.07" />
+      <path d="M4.93 19.07C4.93 19.07 7.76 16.24 9.88 14.12" />
+      <path d="M14.12 9.88C14.12 9.88 16.95 7.05 19.07 4.93" />
+    </svg>
+  )
+}

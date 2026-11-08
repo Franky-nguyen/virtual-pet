@@ -40,7 +40,7 @@ if errorlevel 1 (
 
 echo 4. Compiling Python Detector into a standalone EXE...
 if exist detector.exe del /f detector.exe
-build_env\Scripts\python.exe -m PyInstaller --onefile --noconsole --clean --collect-all mediapipe --add-data "pose_landmarker_heavy.task;." detector.py
+build_env\Scripts\python.exe -m PyInstaller --onefile --noconsole --clean --exclude-module matplotlib --exclude-module tkinter --exclude-module scipy --exclude-module PIL --exclude-module unittest --exclude-module pydoc --exclude-module doctest --exclude-module test --collect-all mediapipe --add-data "pose_landmarker_heavy.task;." detector.py
 if errorlevel 1 (
     echo ERROR: PyInstaller compile failed - see output above.
     pause
@@ -55,6 +55,7 @@ if errorlevel 1 (
     exit /b 1
 )
 rmdir /s /q build_env
+if exist build rmdir /s /q build
 
 echo 6. Compiling TypeScript...
 call npx tsc
@@ -72,7 +73,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo 8. Packaging Electron Installer...
+echo 8. Packaging Electron Installer (PosturePet 2.0)...
 call npx electron-builder --win
 if errorlevel 1 (
     echo ERROR: Electron packaging failed - see output above.
@@ -81,17 +82,19 @@ if errorlevel 1 (
 )
 
 echo 9. Organizing files and cleaning up heavy build artifacts...
-if not exist "PosturePet_Installer" mkdir PosturePet_Installer
+if exist "PosturePet_Installer" rmdir /s /q "PosturePet_Installer"
+mkdir PosturePet_Installer
 move /y release\*.exe PosturePet_Installer\ >nul 2>&1
 
 rmdir /s /q release
 rmdir /s /q dist
 rmdir /s /q dist-electron
+if exist build rmdir /s /q build
 if exist build_env rmdir /s /q build_env
 
 echo.
 echo ==========================================
-echo  SUCCESS! Your lightweight project is ready for GitHub.
+echo  SUCCESS! PosturePet 2.0 is ready for GitHub.
 echo  Your final Windows installer is in: PosturePet_Installer\
 echo ==========================================
 pause

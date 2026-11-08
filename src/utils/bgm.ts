@@ -25,8 +25,8 @@ const playerA = new Audio()
 const playerB = new Audio()
 playerA.volume = MASTER_VOLUME
 playerB.volume = MASTER_VOLUME
-playerA.preload = 'auto'
-playerB.preload = 'auto'
+playerA.preload = 'metadata'
+playerB.preload = 'none'
 
 let activePlayer: HTMLAudioElement = playerA
 let standbyPlayer: HTMLAudioElement = playerB

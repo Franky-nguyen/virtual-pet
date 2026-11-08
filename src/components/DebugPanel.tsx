@@ -10,6 +10,9 @@ export interface DebugMetrics {
   ear_shoulder_ratio?: number
   shoulder_width?: number
   slouch_window?: string
+  neck?: number
+  shoulder?: number
+  lowerBack?: number
 }
 
 interface DebugPanelProps {
@@ -55,6 +58,9 @@ export default function DebugPanel({ open, frame, metrics, status, onClose, onAd
   add('ear->shoulder', metrics?.ear_shoulder_ratio)
   add('shoulder_w', metrics?.shoulder_width)
   add('slouch_window', metrics?.slouch_window)
+  add('neck_score', metrics?.neck)
+  add('shoulder_score', metrics?.shoulder)
+  add('back_score', metrics?.lowerBack)
 
   return (
     <div className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 text-slate-200 overflow-hidden">

@@ -7,6 +7,7 @@ import { playPop } from '../utils/soundEffects'
 interface WardrobeModalProps {
   open: boolean
   petLevel: number
+  isEvolved: boolean
   selectedAccessory: AccessoryType
   onSelect: (id: AccessoryType) => void
   onClose: () => void
@@ -15,6 +16,7 @@ interface WardrobeModalProps {
 export default function WardrobeModal({
   open,
   petLevel,
+  isEvolved,
   selectedAccessory,
   onSelect,
   onClose,
@@ -75,7 +77,7 @@ export default function WardrobeModal({
           </button>
 
           {ACCESSORIES.map((accessory) => {
-            const locked = !isAccessoryUnlocked(accessory.id, petLevel)
+            const locked = !isAccessoryUnlocked(accessory.id, petLevel, isEvolved)
             const equipped = selectedAccessory === accessory.id
 
             return (

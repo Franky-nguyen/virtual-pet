@@ -4,6 +4,13 @@ import electron from 'vite-plugin-electron'
 import renderer from 'vite-plugin-electron-renderer'
 
 export default defineConfig({
+  build: {
+    target: 'esnext',
+    minify: 'esbuild',
+    cssMinify: true,
+    sourcemap: false,
+    reportCompressedSize: false,
+  },
   plugins: [
     react(),
     electron([
@@ -14,7 +21,9 @@ export default defineConfig({
         },
         vite: {
           build: {
-            outDir: 'dist-electron'
+            outDir: 'dist-electron',
+            minify: 'esbuild',
+            sourcemap: false,
           }
         }
       },
@@ -26,6 +35,8 @@ export default defineConfig({
         vite: {
           build: {
             outDir: 'dist-electron',
+            minify: 'esbuild',
+            sourcemap: false,
             lib: {
               // Sandboxed Electron preloads must be CommonJS. The plugin derives
               // the format from package.json "type" ("module" → ESM), which the

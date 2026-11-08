@@ -1,0 +1,61 @@
+{
+  "id": "mochi-cat-fixture",
+  "name": "Mochi",
+  "species": "cat",
+  "breed": "Calico",
+  "createdAt": "2026-11-08T08:30:00.000Z",
+  "sourcePhotos": [
+    {
+      "name": "mochi_front.png",
+      "mimeType": "image/png"
+    },
+    {
+      "name": "mochi_side.jpg",
+      "mimeType": "image/jpeg"
+    }
+  ],
+  "animations": {
+    "idle": {
+      "file": "idle.png",
+      "frames": 4,
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "frameDurationMs": 150
+    },
+    "walk": {
+      "file": "walk.png",
+      "frames": 6,
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "frameDurationMs": 150
+    },
+    "hurt": {
+      "file": "hurt.png",
+      "frames": 2,
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "frameDurationMs": 150
+    },
+    "death": {
+      "file": "death.png",
+      "frames": 3,
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "frameDurationMs": 150
+    },
+    "attack": {
+      "file": "attack.png",
+      "frames": 4,
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "frameDurationMs": 150
+    },
+    "evolution": {
+      "file": "evolution.png",
+      "frames": 8,
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "frameDurationMs": 150
+    }
+  }
+}

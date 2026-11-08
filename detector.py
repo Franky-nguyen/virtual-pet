@@ -38,8 +38,12 @@ PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
 _NOSE = 0
+_LEFT_EAR = 7
+_RIGHT_EAR = 8
 _LEFT_SHOULDER = 11
 _RIGHT_SHOULDER = 12
+_LEFT_HIP = 23
+_RIGHT_HIP = 24
 
 VISIBILITY_THRESHOLD = 0.5
 MIN_SHOULDER_WIDTH = 1e-6
@@ -103,6 +107,10 @@ calibrate_requested = False
 # Debug mode is OFF unless a client explicitly asks for it — annotated frames
 # are only encoded/streamed while true, keeping CPU at ~zero in normal use.
 debug_enabled = False
+# Camera capture gate. Wellness Mode (UC-4) sets this False, which releases the
+# VideoCapture handle — the webcam LED turns off and the device is genuinely
+# unpowered, not merely ignored. Nothing re-opens it until a client re-enables.
+capture_enabled = True
 
 
 # ---------------------------------------------------------------------------
@@ -243,14 +251,75 @@ def draw_landmarks_on_frame(frame_bgr, landmarks) -> None:
         cv2.circle(frame_bgr, (x, y), 2, (40, 40, 255), -1, cv2.LINE_AA)
 
 
+def compute_region_scores(landmarks, ratio: Optional[float]) -> dict:
+    """Compute 0-10 heuristic slouch strain scores for neck, shoulder, and lowerBack.
+
+    Uses existing MediaPipe pose landmarks (nose, ears, shoulders, hips) and the
+    posture ratio relative to ``baseline_ratio`` — no additional ML models.
+    """
+    if landmarks is None or ratio is None:
+        return {"neck": 0.0, "shoulder": 0.0, "lowerBack": 0.0}
+
+    left_shoulder = landmarks[_LEFT_SHOULDER]
+    right_shoulder = landmarks[_RIGHT_SHOULDER]
+    left_ear = landmarks[_LEFT_EAR]
+    right_ear = landmarks[_RIGHT_EAR]
+
+    dx = abs(right_shoulder.x - left_shoulder.x)
+    dy = abs(right_shoulder.y - left_shoulder.y)
+    if dx <= MIN_SHOULDER_WIDTH:
+        return {"neck": 0.0, "shoulder": 0.0, "lowerBack": 0.0}
+
+    base = (
+        baseline_ratio
+        if (baseline_ratio is not None and baseline_ratio > MIN_SHOULDER_WIDTH)
+        else 1.0
+    )
+    ratio_deficit = max(0.0, (base - ratio) / base)
+
+    # Shoulder tilt in degrees against horizontal
+    shoulder_slope_deg = math.degrees(math.atan2(dy, dx))
+
+    # Ear-to-shoulder vertical distance normalized by shoulder width
+    shoulder_mid_x = (left_shoulder.x + right_shoulder.x) / 2.0
+    shoulder_mid_y = (left_shoulder.y + right_shoulder.y) / 2.0
+    ear_mid_y = (left_ear.y + right_ear.y) / 2.0
+    ear_shoulder_ratio = (shoulder_mid_y - ear_mid_y) / dx
+    ear_deficit = max(0.0, (0.55 * base - ear_shoulder_ratio) / max(0.25 * base, 0.05))
+
+    # Trunk lean / torso sink for lower-back slouch
+    torso_sink = max(0.0, (shoulder_mid_y - 0.58) * 18.0)
+    trunk_lean = 0.0
+    if len(landmarks) > _RIGHT_HIP:
+        left_hip = landmarks[_LEFT_HIP]
+        right_hip = landmarks[_RIGHT_HIP]
+        if left_hip.visibility >= 0.2 and right_hip.visibility >= 0.2:
+            hip_mid_x = (left_hip.x + right_hip.x) / 2.0
+            trunk_lean = (abs(shoulder_mid_x - hip_mid_x) / dx) * 12.0
+
+    neck_score = min(10.0, max(0.0, round(ratio_deficit * 25.0 + ear_deficit * 4.5, 1)))
+    shoulder_score = min(
+        10.0, max(0.0, round(shoulder_slope_deg * 0.8 + ratio_deficit * 18.0, 1))
+    )
+    lower_back_score = min(
+        10.0, max(0.0, round(ratio_deficit * 22.0 + torso_sink + trunk_lean, 1))
+    )
+
+    return {
+        "neck": neck_score,
+        "shoulder": shoulder_score,
+        "lowerBack": lower_back_score,
+    }
+
+
 def compute_debug_metrics(landmarks, ratio: Optional[float]) -> dict:
     """Extra telemetry for the debug overlay (angles / distances / window)."""
     metrics: dict = {}
     if landmarks is not None:
         left_shoulder = landmarks[_LEFT_SHOULDER]
         right_shoulder = landmarks[_RIGHT_SHOULDER]
-        left_ear = landmarks[7]
-        right_ear = landmarks[8]
+        left_ear = landmarks[_LEFT_EAR]
+        right_ear = landmarks[_RIGHT_EAR]
         dx = abs(right_shoulder.x - left_shoulder.x)
         dy = abs(right_shoulder.y - left_shoulder.y)
         # Shoulder tilt measured against the horizontal, in degrees.
@@ -273,6 +342,10 @@ def compute_debug_metrics(landmarks, ratio: Optional[float]) -> dict:
         metrics["threshold"] = round(threshold, 4)
         if baseline_ratio is not None:
             metrics["baseline"] = round(baseline_ratio, 4)
+    region_scores = compute_region_scores(landmarks, ratio)
+    metrics["neck"] = region_scores["neck"]
+    metrics["shoulder"] = region_scores["shoulder"]
+    metrics["lowerBack"] = region_scores["lowerBack"]
     metrics["slouch_window"] = f"{sum(slouch_frames)}/{len(slouch_frames)}"
     return metrics
 
@@ -353,9 +426,15 @@ async def broadcast(payload: dict) -> None:
             clients.discard(client)
 
 
-async def broadcast_status(status: str) -> None:
-    """Broadcast one of the detector's official statuses."""
-    await broadcast({"status": status})
+async def broadcast_status(status: str, scores: Optional[dict] = None) -> None:
+    """Broadcast one of the detector's official statuses along with 0-10 region scores."""
+    payload: dict = {"status": status}
+    if scores is not None:
+        payload["neck"] = scores["neck"]
+        payload["shoulder"] = scores["shoulder"]
+        payload["lowerBack"] = scores["lowerBack"]
+        payload["scores"] = scores
+    await broadcast(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +442,7 @@ async def broadcast_status(status: str) -> None:
 # ---------------------------------------------------------------------------
 async def websocket_handler(websocket) -> None:
     """Handle WebSocket connections and calibration commands."""
-    global calibrate_requested, debug_enabled
+    global calibrate_requested, debug_enabled, capture_enabled
 
     clients.add(websocket)
     print(f"Client connected. Total clients: {len(clients)}")
@@ -381,6 +460,17 @@ async def websocket_handler(websocket) -> None:
             elif isinstance(message, dict) and message.get("command") == "debug":
                 debug_enabled = bool(message.get("enabled", False))
                 print(f"Debug streaming {'enabled' if debug_enabled else 'disabled'}.")
+            elif isinstance(message, dict) and message.get("command") == "capture":
+                # UC-4: release the camera outright in Wellness Mode. The main
+                # loop closes the handle on its next tick, so the device stops
+                # being powered rather than just being ignored.
+                enabled = bool(message.get("enabled", True))
+                if enabled != capture_enabled:
+                    capture_enabled = enabled
+                    print(
+                        "Camera capture enabled." if enabled
+                        else "Camera capture disabled — webcam released."
+                    )
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -442,22 +532,54 @@ async def run_calibration(cap) -> bool:
 # Main detection loop
 # ---------------------------------------------------------------------------
 async def posture_detection_loop() -> None:
-    """Capture frames, classify posture, and broadcast debounced statuses."""
-    global current_status, last_detection_time, calibrate_requested
+    """Capture frames, classify posture, and broadcast debounced statuses.
 
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FPS, 10)
+    The camera handle is owned by this loop and only exists while
+    ``capture_enabled`` is true. Wellness Mode flips that flag off, which closes
+    the handle so the webcam hardware is released (LED off) rather than merely
+    ignored.
+    """
+    global current_status, last_detection_time, calibrate_requested, capture_enabled
 
-    if not cap.isOpened():
-        print("Warning: camera could not be opened. Broadcasting 'away'.")
-    else:
-        print("Camera initialized. Processing at ~10 FPS")
+    cap = None
+    last_detection_time = time.monotonic()
+    last_slouch_score_broadcast = 0.0
 
     print("Starting posture detection...")
-    last_detection_time = time.monotonic()
 
     try:
         while True:
+            # ── Camera gate (UC-4: Wellness Mode keeps the device unpowered) ──
+            if not capture_enabled:
+                if cap is not None:
+                    cap.release()
+                    del cap
+                    cap = None
+                    import gc
+                    gc.collect()
+                    reset_smoothing()
+                    print("Camera released. Wellness Mode is active.")
+                    if current_status != "away":
+                        current_status = "away"
+                        await broadcast_status("away")
+                await asyncio.sleep(0.5)
+                continue
+
+            # Lazy open: only allocate the device once capture is actually on.
+            # Request compact 320x240 frames and a 1-frame buffer to minimize
+            # RAM and CPU usage (MediaPipe internally downscales to 256x256).
+            if cap is None:
+                cap = cv2.VideoCapture(0)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+                cap.set(cv2.CAP_PROP_FPS, 10)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                last_detection_time = time.monotonic()
+                if not cap.isOpened():
+                    print("Warning: camera could not be opened. Broadcasting 'away'.")
+                else:
+                    print("Camera initialized (320x240 low-resource mode).")
+
             if calibrate_requested:
                 calibrate_requested = False
                 await run_calibration(cap)
@@ -493,6 +615,8 @@ async def posture_detection_loop() -> None:
 
             if status != current_status:
                 current_status = status
+                last_slouch_score_broadcast = now
+                scores = compute_region_scores(landmarks, ratio)
                 if ratio is not None:
                     threshold = SLOUCH_RATIO_THRESHOLD * (
                         baseline_ratio if baseline_ratio is not None else ratio
@@ -504,11 +628,16 @@ async def posture_detection_loop() -> None:
                     )
                 else:
                     print(f"Posture status: {status}")
-                await broadcast_status(status)
+                await broadcast_status(status, scores)
+            elif status == "slouching" and (now - last_slouch_score_broadcast) >= 1.0:
+                last_slouch_score_broadcast = now
+                scores = compute_region_scores(landmarks, ratio)
+                await broadcast_status(status, scores)
 
             await asyncio.sleep(FRAME_DELAY_SECONDS)
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
 
 
 async def main() -> None:

@@ -39,31 +39,31 @@ export const ACCESSORIES: readonly Accessory[] = [
     id: 'sunglasses',
     name: 'Sunglasses',
     icon: '🕶️',
-    unlockedAtLevel: 1,
+    unlockedAtLevel: 2,
   },
   {
     id: 'partyhat',
     name: 'Party Hat',
     icon: '🎉',
-    unlockedAtLevel: 2,
+    unlockedAtLevel: 4,
   },
   {
     id: 'crown',
     name: 'Crown',
     icon: '👑',
-    unlockedAtLevel: 3,
+    unlockedAtLevel: 6,
   },
   {
     id: 'wizardhat',
     name: 'Wizard Hat',
     icon: '🧙',
-    unlockedAtLevel: 5,
+    unlockedAtLevel: 8,
   },
   {
     id: 'bowtie',
     name: 'Bow Tie',
     icon: '🎀',
-    unlockedAtLevel: 1,
+    unlockedAtLevel: 3,
   },
 ] as const
 
@@ -76,10 +76,19 @@ export function getAccessory(id: AccessoryType): Accessory | undefined {
   return ACCESSORIES.find(a => a.id === id)
 }
 
-/** Returns true if the accessory is unlocked for the given pet level. */
-export function isAccessoryUnlocked(id: AccessoryType, level: number): boolean {
+/** Returns true if the accessory is unlocked for the given pet level.
+ *  Accessories unlock permanently once the pet reaches `accessory.unlockedAtLevel`:
+ *   - Sunglasses: Level 2
+ *   - Bow Tie: Level 3
+ *   - Party Hat: Level 4
+ *   - Crown: Level 6
+ *   - Wizard Hat: Level 8
+ */
+export function isAccessoryUnlocked(id: AccessoryType, level: number, _isEvolved: boolean = false): boolean {
+  if (id === 'none') return true
   const accessory = getAccessory(id)
-  return accessory ? level >= accessory.unlockedAtLevel : false
+  if (!accessory) return false
+  return level >= accessory.unlockedAtLevel
 }
 
 /** Returns the display name for an accessory. */

@@ -15,7 +15,7 @@ import StretchBreakModal, {
 } from './components/StretchBreakModal'
 import { Card } from './components/ui/card'
 import { Button } from './components/ui/button'
-import { ChevronUpIcon, ChevronDownIcon, XIcon, VolumeOnIcon, VolumeOffIcon, PaletteIcon, FlowerIcon, SparkleIcon } from './components/icons'
+import { ChevronUpIcon, ChevronDownIcon, XIcon, VolumeOnIcon, VolumeOffIcon, PaletteIcon, FlowerIcon } from './components/icons'
 import type { PostureData } from './types/electron'
 import type { AccessoryType } from './types/accessories'
 import { ANIMATION_FRAMES, EVOLVED_ANIMATION_FRAMES, EVOLUTION_FRAME_MS } from './types/accessories'
@@ -1664,7 +1664,6 @@ function App() {
                 className="gap-1 text-[11px] h-6 px-2 shrink-0"
                 onClick={() => { playToggle(); setCreatePetOpen(true) }}
               >
-                <SparkleIcon className="size-3" />
                 Create Your Own Pet
               </Button>
             </div>

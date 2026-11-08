@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Button } from './ui/button'
-import { XIcon, SparkleIcon } from './icons'
+import { XIcon } from './icons'
 import {
   ALLOWED_PHOTO_MIME_TYPES,
   PET_CREATION_STAGES,
@@ -324,24 +324,21 @@ export default function CreatePetModal({
       <div className="relative z-10 w-full max-w-[352px] max-h-[580px] rounded-xl border bg-card text-card-foreground shadow-xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 pt-4 pb-3 border-b border-border shrink-0">
-          <div className="flex items-center gap-1.5">
-            <SparkleIcon className="size-4 text-primary shrink-0" />
-            <div>
-              <div className="flex items-center gap-1.5">
-                <h2 id="create-pet-modal-title" className="text-sm font-semibold leading-none">
-                  {view === 'preview' ? 'Pet Pack Ready!' : 'Create Your Own Pet'}
-                </h2>
-                <span className="rounded-full bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide">
-                  Experimental
-                </span>
-              </div>
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                {view === 'form' && 'Upload pet photos to generate 64×64 pixel-art sprites'}
-                {view === 'progress' && 'Processing custom pet sprite pack…'}
-                {view === 'error' && 'Generation encountered an issue'}
-                {view === 'preview' && 'Supports all 5 Wardrobe accessories (does not evolve)'}
-              </p>
+          <div>
+            <div className="flex items-center gap-1.5">
+              <h2 id="create-pet-modal-title" className="text-sm font-semibold leading-none">
+                {view === 'preview' ? 'Pet Pack Ready!' : 'Create Your Own Pet'}
+              </h2>
+              <span className="rounded-full bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide">
+                Experimental
+              </span>
             </div>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              {view === 'form' && 'Upload pet photos to generate 64×64 pixel-art sprites'}
+              {view === 'progress' && 'Processing custom pet sprite pack…'}
+              {view === 'error' && 'Generation encountered an issue'}
+              {view === 'preview' && 'Supports all 5 Wardrobe accessories (does not evolve)'}
+            </p>
           </div>
           {view !== 'progress' && (
             <Button
@@ -392,13 +389,12 @@ export default function CreatePetModal({
                         role="radio"
                         aria-checked={selected}
                         onClick={() => { playPop(); setSpecies(opt.value) }}
-                        className={`flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-md border text-[11px] font-medium transition-colors ${
+                        className={`flex items-center justify-center py-1.5 px-1 rounded-md border text-[11px] font-medium transition-colors ${
                           selected
                             ? 'border-primary bg-primary/10 text-foreground ring-1 ring-primary'
                             : 'border-border bg-muted/40 text-muted-foreground hover:text-foreground hover:bg-muted'
                         }`}
                       >
-                        <span className="text-sm leading-none" aria-hidden="true">{opt.emoji}</span>
                         <span>{opt.label}</span>
                       </button>
                     )

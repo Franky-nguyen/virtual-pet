@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Button } from './ui/button'
-import { XIcon, SparkleIcon } from './icons'
+import { XIcon } from './icons'
 import { BUILTIN_DOG_ID, BUILTIN_CAT_ID, type RuntimeCustomPet } from '../types/customPet'
 import { getSpriteUrl } from './PetDisplay'
 import { playPop, playToggle } from '../utils/soundEffects'
@@ -322,7 +322,6 @@ export default function PetSelectorModal({
               onOpenCreateModal()
             }}
           >
-            <SparkleIcon className="size-3.5" />
             Create Your Own Pet
             <span className="rounded-full bg-amber-200 text-amber-950 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide">
               Experimental

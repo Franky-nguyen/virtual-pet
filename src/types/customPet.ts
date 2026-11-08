@@ -31,14 +31,14 @@ export type CustomAnimationKey = 'idle' | 'walk' | 'hurt' | 'death' | 'attack' |
 /** Supported pet species in the Create Your Own Pet workflow. */
 export type PetSpecies = 'dog' | 'cat' | 'rabbit' | 'hamster' | 'bird' | 'fox' | 'other'
 
-export const PET_SPECIES_OPTIONS: readonly { value: PetSpecies; label: string; emoji: string }[] = [
-  { value: 'dog',     label: 'Dog',     emoji: '🐶' },
-  { value: 'cat',     label: 'Cat',     emoji: '🐱' },
-  { value: 'rabbit',  label: 'Rabbit',  emoji: '🐰' },
-  { value: 'hamster', label: 'Hamster', emoji: '🐹' },
-  { value: 'bird',    label: 'Bird',    emoji: '🐦' },
-  { value: 'fox',     label: 'Fox',     emoji: '🦊' },
-  { value: 'other',   label: 'Other',   emoji: '🐾' },
+export const PET_SPECIES_OPTIONS: readonly { value: PetSpecies; label: string }[] = [
+  { value: 'dog',     label: 'Dog' },
+  { value: 'cat',     label: 'Cat' },
+  { value: 'rabbit',  label: 'Rabbit' },
+  { value: 'hamster', label: 'Hamster' },
+  { value: 'bird',    label: 'Bird' },
+  { value: 'fox',     label: 'Fox' },
+  { value: 'other',   label: 'Other' },
 ] as const
 
 /** Allowed source photo MIME types. */

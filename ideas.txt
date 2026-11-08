@@ -1,5 +1,0 @@
-gamify it:
--somehow add a engine to customize your char 
--add two bar (one health one xp bar) 
-	+every pet spawn with 100hp and depends on your behavior will lose health overitime
-	+xp bar are used to buy items(healt, cosmetic)

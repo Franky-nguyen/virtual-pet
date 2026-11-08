@@ -40,7 +40,7 @@ if errorlevel 1 (
 
 echo 4. Compiling Python Detector into a standalone EXE...
 if exist detector.exe del /f detector.exe
-build_env\Scripts\python.exe -m PyInstaller --onefile --noconsole --clean --exclude-module matplotlib --exclude-module tkinter --exclude-module scipy --exclude-module PIL --exclude-module unittest --exclude-module pydoc --exclude-module doctest --exclude-module test --collect-all mediapipe --add-data "pose_landmarker_heavy.task;." detector.py
+build_env\Scripts\python.exe -m PyInstaller --onefile --noconsole --clean --collect-all mediapipe --add-data "pose_landmarker_heavy.task;." detector.py
 if errorlevel 1 (
     echo ERROR: PyInstaller compile failed - see output above.
     pause

@@ -3,10 +3,24 @@ import base64
 import json
 import math
 import os
+import sys
 import time
+import types
 import urllib.request
 from collections import deque
 from typing import Optional
+
+# MediaPipe's vision.drawing_utils unconditionally imports matplotlib.pyplot at
+# top-level even when drawing utilities are unused. Provide a lightweight stub if
+# matplotlib is not bundled so `import mediapipe` never raises ModuleNotFoundError.
+try:
+    import matplotlib.pyplot as _plt  # noqa: F401
+except ModuleNotFoundError:
+    _mpl = types.ModuleType("matplotlib")
+    _plt_mod = types.ModuleType("matplotlib.pyplot")
+    _mpl.pyplot = _plt_mod
+    sys.modules.setdefault("matplotlib", _mpl)
+    sys.modules.setdefault("matplotlib.pyplot", _plt_mod)
 
 import cv2
 import mediapipe as mp

@@ -10,8 +10,7 @@ Sit upright to keep your pet healthy and earn XP toward evolutions and wardrobe 
 
 - [Installing Pre-Built Releases](#installing-pre-built-releases)
   - [Windows (`.exe`)](#windows-exe)
-  - [macOS (`.dmg` / `.app`)](#macos-dmg--app)
-  - [Linux (`.deb` / `.rpm` / `.AppImage`)](#linux-deb--rpm--appimage)
+
 - [Running from Source](#running-from-source)
 - [Building Installers Locally](#building-installers-locally)
 - [Building Installers for All OSes via GitHub Actions](#building-installers-for-all-oses-via-github-actions)
@@ -20,7 +19,7 @@ Sit upright to keep your pet healthy and earn XP toward evolutions and wardrobe 
 
 ---
 
-## Installing Pre-Built Releases
+## Installing Pre-Built Releases ONLY FOR WINSDOW
 
 > **Note:** Each OS needs its native installer built on that OS (see [GitHub Actions](#building-installers-for-all-oses-via-github-actions) if you are generating macOS/Linux installers from a Windows machine).
 
@@ -29,44 +28,6 @@ Sit upright to keep your pet healthy and earn XP toward evolutions and wardrobe 
 2. Double-click the installer (current-user install, no admin prompt required).
 3. If Windows SmartScreen warns on an unsigned build, click **More info** -> **Run anyway**.
 4. Launch **PosturePet 2.0** from the Start Menu.
-
-### macOS (`.dmg` / `.app`)
-1. Download the `.dmg` installer (or the `-macOS.zip` archive).
-2. Open the `.dmg` and drag **PosturePet 2.0** into **Applications** (or unzip and move `PosturePet 2.0.app` into `/Applications`).
-3. **First launch (unsigned Gatekeeper bypass):**
-   If macOS says the app cannot be opened or is from an unidentified developer, clear the quarantine attribute in Terminal:
-   ```bash
-   xattr -cr "/Applications/PosturePet 2.0.app"
-   ```
-   Alternatively: **Right-click -> Open**, or allow it in **System Settings -> Privacy & Security -> Open Anyway**.
-4. When prompted on first launch, grant **Camera** permission in **System Settings -> Privacy & Security -> Camera** (or toggle **Wellness Mode** inside the app if you don't want webcam tracking).
-5. Global hide/show shortcut on macOS: `Ctrl+Option+H` or `Cmd+Option+H`.
-
-### Linux (`.deb` / `.rpm` / `.AppImage`)
-1. Download the package matching your distro (quote the filename or press `Tab` to autocomplete if it contains spaces):
-   - **Ubuntu / Debian / Pop!_OS / Mint (`.deb`)**:
-     ```bash
-     sudo apt update
-     sudo apt install "./<downloaded-file>.deb"
-     ```
-   - **Fedora / RHEL / openSUSE (`.rpm`)**:
-     ```bash
-     sudo dnf install "./<downloaded-file>.rpm"
-     ```
-   - **Universal Linux (`.AppImage`)**:
-     ```bash
-     chmod +x "./<downloaded-file>.AppImage"
-     "./<downloaded-file>.AppImage"
-     ```
-     > On Ubuntu 22.04+, AppImage files require `libfuse2`: `sudo apt install libfuse2`.
-2. **Webcam permission (if camera does not open):**
-   Ensure your user belongs to the `video` group, then log out and back in:
-   ```bash
-   sudo usermod -aG video "$USER"
-   ```
-3. Global hide/show shortcut on Linux: `Ctrl+Alt+H`.
-
----
 
 ## Running from Source
 

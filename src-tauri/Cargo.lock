@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "posture-pet"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",

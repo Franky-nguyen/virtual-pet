@@ -75,16 +75,33 @@ if [ ! -d "$ROOT_DIR/node_modules" ]; then
 fi
 
 echo "6. Packaging Tauri app & native installers..."
-BUNDLE_ARGS=()
-if [ "$OS_NAME" = "Linux" ] && ! command -v rpmbuild >/dev/null 2>&1; then
-  echo "Note: rpmbuild not found — building .deb and .AppImage (install 'rpm' to also generate .rpm)."
-  BUNDLE_ARGS=(--bundles deb,appimage)
-fi
+TAURI_RESOURCE_CONFIG='{"bundle":{"resources":{"../detector":"detector"}}}'
 
-if [ ${#BUNDLE_ARGS[@]} -gt 0 ]; then
-  npx tauri build "${BUNDLE_ARGS[@]}" --config '{"bundle":{"resources":{"../detector":"detector"}}}'
+build_bundle() {
+  local target="$1"
+  echo "Building ${target} bundle..."
+  npx tauri build --bundles "$target" --config "$TAURI_RESOURCE_CONFIG"
+}
+
+if [ "$OS_NAME" = "Linux" ]; then
+  # Keep .deb as the required Linux deliverable. AppImage and RPM tooling can
+  # vary by runner/distro, so a failure in either optional format must not
+  # prevent the reliable Debian package from being published.
+  build_bundle deb
+
+  if command -v rpmbuild >/dev/null 2>&1; then
+    if ! build_bundle rpm; then
+      echo "Warning: RPM packaging failed — continuing with the .deb and AppImage."
+    fi
+  else
+    echo "Note: rpmbuild not found — skipping .rpm."
+  fi
+
+  if ! build_bundle appimage; then
+    echo "Warning: AppImage packaging failed — continuing with the .deb package."
+  fi
 else
-  npx tauri build --config '{"bundle":{"resources":{"../detector":"detector"}}}'
+  build_bundle "$( [ "$OS_NAME" = "Darwin" ] && echo dmg,app || echo nsis )"
 fi
 
 echo "7. Collecting installers in PosturePet_Installer/..."

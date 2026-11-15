@@ -425,9 +425,11 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if event.state == ShortcutState::Pressed
-                        && shortcut.matches(Modifiers::CONTROL | Modifiers::ALT, Code::KeyH)
-                    {
+                    let is_toggle_hotkey =
+                        shortcut.matches(Modifiers::CONTROL | Modifiers::ALT, Code::KeyH)
+                            || (cfg!(target_os = "macos")
+                                && shortcut.matches(Modifiers::SUPER | Modifiers::ALT, Code::KeyH));
+                    if event.state == ShortcutState::Pressed && is_toggle_hotkey {
                         toggle_tray_visibility(app);
                     }
                 })
@@ -441,9 +443,15 @@ pub fn run() {
 
             spawn_posture_ws_loop(app.handle().clone());
 
-            // Register CommandOrControl+Alt+H global shortcut
+            // Register CommandOrControl+Alt+H global shortcut (Ctrl+Alt+H, plus Cmd+Option+H on macOS)
             let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyH);
             let _ = app.global_shortcut().register(shortcut);
+            #[cfg(target_os = "macos")]
+            {
+                let mac_shortcut =
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::ALT), Code::KeyH);
+                let _ = app.global_shortcut().register(mac_shortcut);
+            }
 
             // System tray with context menu
             let minimize_item =

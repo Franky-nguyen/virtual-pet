@@ -1,0 +1,42 @@
+# ── Node / Electron ──────────────────────────────────────────
+node_modules/
+dist/
+dist-electron/
+release/
+
+# ── Build artifacts & output ─────────────────────────────────
+PosturePet_Installer/
+build_env/
+src-tauri/target/
+src-tauri/gen/
+captures/
+
+# ── Compiled binaries ────────────────────────────────────────
+*.exe
+/detector
+/PosturePet.log
+detector.spec
+
+# ── Python ───────────────────────────────────────────────────
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+
+# ── TypeScript build info ────────────────────────────────────
+*.tsbuildinfo
+
+# ── Environment variables ────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+detector_error.log
+
+# ── OS / Editor ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+build/

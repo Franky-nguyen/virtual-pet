@@ -129,9 +129,10 @@ If you are on Windows and want native installers for **macOS** and **Linux** wit
 1. Push the repository to GitHub.
 2. Open your repository on GitHub -> **Actions** -> **Build Cross-Platform Installers**.
 3. Click **Run workflow** (or push a version tag such as `git tag v2.0.0 && git push --tags`).
-4. Once all three matrix jobs (`windows-latest`, `ubuntu-22.04`, `macos-latest`) finish, download:
+4. Once all four build jobs (`windows-latest`, `ubuntu-22.04`, Apple Silicon macOS, Intel macOS) finish, download:
    - `PosturePet-windows-installer` (`.exe`)
-   - `PosturePet-macos-installer` (`.dmg` & `-macOS.zip`)
+   - `PosturePet-macos-arm64-installer` (`.dmg` & `-arm64-macOS.zip`) for Apple Silicon Macs
+   - `PosturePet-macos-x64-installer` (`.dmg` & `-x86_64-macOS.zip`) for Intel Macs
    - `PosturePet-linux-installer` (`.deb`, `.rpm`, `.AppImage`)
 
 ---

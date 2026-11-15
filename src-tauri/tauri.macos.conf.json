@@ -1,0 +1,11 @@
+{
+  "identifier": "com.posturepet.desktop",
+  "bundle": {
+    "targets": ["dmg", "app"],
+    "macOS": {
+      "entitlements": "./entitlements.plist",
+      "infoPlist": "./Info.plist",
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

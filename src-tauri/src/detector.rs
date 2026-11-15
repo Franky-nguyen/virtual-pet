@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -11,6 +11,14 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+#[cfg(windows)]
+const DETECTOR_BIN_NAME: &str = "detector.exe";
+#[cfg(not(windows))]
+const DETECTOR_BIN_NAME: &str = "detector";
 
 /// `CreateProcess` flag that stops a console-subsystem child (taskkill, py.exe,
 /// python.exe, ...) from allocating its own console window. Without it, every
@@ -27,6 +35,25 @@ fn no_window(cmd: &mut Command) {
     #[cfg(not(windows))]
     {
         let _ = cmd;
+    }
+}
+
+/// Ensures executable permissions on Unix binaries bundled inside resources.
+fn ensure_executable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            let mode = perms.mode();
+            if mode & 0o111 == 0 {
+                perms.set_mode(mode | 0o755);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -61,14 +88,29 @@ fn resolve_project_root() -> PathBuf {
     }
 }
 
-fn resolve_python_cmd(project_root: &PathBuf) -> Option<Vec<String>> {
-    let venv_python = if cfg!(windows) {
-        project_root.join("venv").join("Scripts").join("python.exe")
-    } else {
-        project_root.join("venv").join("bin").join("python")
-    };
-    if venv_python.exists() {
-        return Some(vec![venv_python.to_string_lossy().to_string()]);
+fn resolve_python_cmd(
+    project_root: &PathBuf,
+    app_data_dir: Option<&PathBuf>,
+) -> Option<Vec<String>> {
+    let mut venv_roots: Vec<PathBuf> = vec![project_root.join("venv"), project_root.join(".venv")];
+    if let Some(dir) = app_data_dir {
+        venv_roots.push(dir.join("venv"));
+    }
+
+    for venv_dir in venv_roots {
+        let candidates = if cfg!(windows) {
+            vec![venv_dir.join("Scripts").join("python.exe")]
+        } else {
+            vec![
+                venv_dir.join("bin").join("python3"),
+                venv_dir.join("bin").join("python"),
+            ]
+        };
+        for py_bin in candidates {
+            if py_bin.exists() {
+                return Some(vec![py_bin.to_string_lossy().to_string()]);
+            }
+        }
     }
 
     let candidates: Vec<Vec<&str>> = if cfg!(windows) {
@@ -79,7 +121,13 @@ fn resolve_python_cmd(project_root: &PathBuf) -> Option<Vec<String>> {
             vec!["python3"],
         ]
     } else {
-        vec![vec!["python3"], vec!["python"]]
+        vec![
+            vec!["python3.12"],
+            vec!["python3.11"],
+            vec!["python3.10"],
+            vec!["python3"],
+            vec!["python"],
+        ]
     };
 
     for argv in candidates {
@@ -103,21 +151,35 @@ fn resolve_python_cmd(project_root: &PathBuf) -> Option<Vec<String>> {
 
 pub fn cleanup_detector(app: &AppHandle) {
     let state = app.state::<Mutex<DetectorState>>();
-    let mut pid_to_kill: Option<u32> = None;
+    let mut child_to_kill: Option<Child> = None;
 
     if let Ok(mut guard) = state.lock() {
         guard.detector_spawned = false;
         guard.backend_connected = false;
         guard.ws_tx = None;
-        if let Some(mut child) = guard.python_process.take() {
-            pid_to_kill = Some(child.id());
-            let _ = child.kill();
-        }
+        child_to_kill = guard.python_process.take();
+    }
+
+    #[cfg(unix)]
+    if let Some(mut child) = child_to_kill {
+        let pid = child.id();
+        // Terminate child workers spawned by PyInstaller --onefile before killing parent
+        // so children are not reparented and port 8765 / webcam handle release immediately.
+        let _ = Command::new("pkill")
+            .args(["-TERM", "-P", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[cfg(windows)]
     {
-        if let Some(pid) = pid_to_kill {
+        if let Some(mut child) = child_to_kill {
+            let pid = child.id();
+            let _ = child.kill();
             let mut kill_child = Command::new("taskkill");
             no_window(&mut kill_child);
             let _ = kill_child
@@ -151,31 +213,32 @@ pub fn start_detector(app: &AppHandle) {
     }
 
     let project_root = resolve_project_root();
-    let log_path = app
-        .path()
-        .app_data_dir()
+    let app_data_dir = app.path().app_data_dir().ok();
+    let log_path = app_data_dir
+        .as_ref()
         .map(|d| {
-            let _ = std::fs::create_dir_all(&d);
+            let _ = std::fs::create_dir_all(d);
             d.join("detector_error.log")
         })
-        .unwrap_or_else(|_| project_root.join("detector_error.log"));
+        .unwrap_or_else(|| project_root.join("detector_error.log"));
+
+    let _ = std::fs::write(&log_path, "");
 
     let stderr_stdio = OpenOptions::new()
         .create(true)
-        .write(true)
-        .truncate(true)
+        .append(true)
         .open(&log_path)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
 
-    // 1. Check bundled resource or dev detector.exe
+    // 1. Check bundled resource or dev detector binary (detector.exe on Windows, detector on Unix)
     let bundled_exe = app
         .path()
-        .resolve("detector.exe", BaseDirectory::Resource)
+        .resolve(DETECTOR_BIN_NAME, BaseDirectory::Resource)
         .ok()
         .filter(|p| p.exists())
         .or_else(|| {
-            let dev_exe = project_root.join("detector.exe");
+            let dev_exe = project_root.join(DETECTOR_BIN_NAME);
             if dev_exe.exists() {
                 Some(dev_exe)
             } else {
@@ -184,6 +247,7 @@ pub fn start_detector(app: &AppHandle) {
         });
 
     if let Some(exe_path) = bundled_exe {
+        ensure_executable(&exe_path);
         let mut spawn_exe = Command::new(&exe_path);
         no_window(&mut spawn_exe);
         match spawn_exe
@@ -199,36 +263,64 @@ pub fn start_detector(app: &AppHandle) {
                 return;
             }
             Err(err) => {
-                let _ = std::fs::write(&log_path, format!("Failed to start detector.exe: {err}"));
-                if let Ok(mut guard) = state.lock() {
-                    guard.detector_spawned = false;
+                let warn = format!(
+                    "Warning: Failed to start {} ({}): {err}; falling back to Python detector.py\n",
+                    DETECTOR_BIN_NAME,
+                    exe_path.display()
+                );
+                if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
+                    use std::io::Write;
+                    let _ = f.write_all(warn.as_bytes());
                 }
-                return;
             }
         }
     }
 
-    // 2. Fallback: run detector.py with resolved Python interpreter
-    let detector_py = project_root.join("detector.py");
-    let Some(python_cmd) = resolve_python_cmd(&project_root) else {
-        let msg = "No Python 3 interpreter found (tried venv, py -3.12, py, python, python3)";
-        let _ = std::fs::write(&log_path, msg);
+    // 2. Fallback: run detector.py from project_root or bundled Resources with resolved Python interpreter
+    let detector_py = {
+        let local_py = project_root.join("detector.py");
+        if local_py.exists() {
+            Some(local_py)
+        } else {
+            app.path()
+                .resolve("detector.py", BaseDirectory::Resource)
+                .ok()
+                .filter(|p| p.exists())
+        }
+    };
+
+    let Some(detector_py) = detector_py else {
+        let msg = format!(
+            "Posture detector not found (checked {} and detector.py in {} and Resources)\n",
+            DETECTOR_BIN_NAME,
+            project_root.display()
+        );
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
+            use std::io::Write;
+            let _ = f.write_all(msg.as_bytes());
+        }
         if let Ok(mut guard) = state.lock() {
             guard.detector_spawned = false;
         }
         return;
     };
 
-    if !detector_py.exists() {
-        let msg = format!("Posture detector not found at {}", detector_py.display());
-        let _ = std::fs::write(&log_path, msg);
+    let Some(python_cmd) = resolve_python_cmd(&project_root, app_data_dir.as_ref()) else {
+        let msg = "No Python 3 interpreter found (tried venv, .venv, app_data/venv, and system python3)\n";
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
+            use std::io::Write;
+            let _ = f.write_all(msg.as_bytes());
+        }
         if let Ok(mut guard) = state.lock() {
             guard.detector_spawned = false;
         }
         return;
-    }
+    };
 
-    let stderr_stdio_py = File::create(&log_path)
+    let stderr_stdio_py = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
 
@@ -249,7 +341,11 @@ pub fn start_detector(app: &AppHandle) {
             }
         }
         Err(err) => {
-            let _ = std::fs::write(&log_path, format!("Failed to start python: {err}"));
+            let msg = format!("Failed to start python: {err}\n");
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
+                use std::io::Write;
+                let _ = f.write_all(msg.as_bytes());
+            }
             if let Ok(mut guard) = state.lock() {
                 guard.detector_spawned = false;
             }

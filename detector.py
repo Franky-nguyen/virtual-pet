@@ -35,9 +35,20 @@ MODEL_URL = (
     "pose_landmarker/pose_landmarker_heavy/float16/1/"
     "pose_landmarker_heavy.task"
 )
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "pose_landmarker_heavy.task")
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_BUNDLED_MODEL_PATH = os.path.join(_SCRIPT_DIR, "pose_landmarker_heavy.task")
+_CACHE_MODEL_PATH = os.path.join(
+    os.path.expanduser("~"), ".cache", "posturepet", "pose_landmarker_heavy.task"
+)
 
-if not os.path.exists(MODEL_PATH):
+if os.path.exists(_BUNDLED_MODEL_PATH):
+    MODEL_PATH = _BUNDLED_MODEL_PATH
+elif os.path.exists(_CACHE_MODEL_PATH):
+    MODEL_PATH = _CACHE_MODEL_PATH
+else:
+    target_dir = _SCRIPT_DIR if os.access(_SCRIPT_DIR, os.W_OK) else os.path.dirname(_CACHE_MODEL_PATH)
+    os.makedirs(target_dir, exist_ok=True)
+    MODEL_PATH = os.path.join(target_dir, "pose_landmarker_heavy.task")
     print(f"Model not found. Downloading from:\n  {MODEL_URL}")
     urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
     print(f"Model saved to: {MODEL_PATH}")

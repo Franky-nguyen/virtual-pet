@@ -1,5 +1,6 @@
 {
+  "productName": "posture-pet",
   "bundle": {
-    "targets": ["deb", "rpm", "appimage"]
+    "targets": ["deb"]
   }
 }

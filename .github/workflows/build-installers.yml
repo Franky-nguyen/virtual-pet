@@ -122,7 +122,7 @@ jobs:
               safe="${safe//$'\r'/'%0D'}"
               safe="${safe//$'\n'/'%0A'}"
               echo "::error file=$log::$safe"
-            done < <(tail -n 20 "$log")
+            done < <(tail -n 10 "$log")
           fi
 
       - name: Build Windows detector & NSIS installer

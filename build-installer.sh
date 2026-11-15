@@ -83,11 +83,86 @@ build_bundle() {
   npx tauri build --bundles "$target" --config "$TAURI_RESOURCE_CONFIG"
 }
 
+build_deb_fallback() {
+  local bundle_dir="$ROOT_DIR/src-tauri/target/release/bundle"
+  local bin_path="$ROOT_DIR/src-tauri/target/release/posture-pet"
+  if [ ! -x "$bin_path" ]; then
+    echo "Compiled binary missing at $bin_path — building binary with --no-bundle..."
+    npx tauri build --no-bundle --config "$TAURI_RESOURCE_CONFIG"
+  fi
+
+  local version
+  version="$(node -p "require('./package.json').version")"
+  local stage="$bundle_dir/deb/posture-pet_${version}_amd64"
+  local deb_out="$bundle_dir/deb/posture-pet_${version}_amd64.deb"
+
+  rm -rf "$stage"
+  mkdir -p \
+    "$stage/DEBIAN" \
+    "$stage/usr/bin" \
+    "$stage/usr/lib/posture-pet/fixtures" \
+    "$stage/usr/share/applications" \
+    "$stage/usr/share/icons/hicolor/32x32/apps" \
+    "$stage/usr/share/icons/hicolor/128x128/apps" \
+    "$stage/usr/share/icons/hicolor/256x256@2/apps"
+
+  cp -f "$bin_path" "$stage/usr/bin/posture-pet"
+  chmod 0755 "$stage/usr/bin/posture-pet"
+
+  cp -f "$ROOT_DIR/detector" "$stage/usr/lib/posture-pet/detector"
+  chmod 0755 "$stage/usr/lib/posture-pet/detector"
+  cp -f "$ROOT_DIR/detector.py" "$stage/usr/lib/posture-pet/detector.py"
+  cp -f "$ROOT_DIR/pose_landmarker_heavy.task" "$stage/usr/lib/posture-pet/pose_landmarker_heavy.task"
+  if [ -d "$ROOT_DIR/fixtures/mochi-cat-pack" ]; then
+    cp -R "$ROOT_DIR/fixtures/mochi-cat-pack" "$stage/usr/lib/posture-pet/fixtures/mochi-cat-pack"
+  fi
+
+  cp -f "$ROOT_DIR/src-tauri/icons/32x32.png" "$stage/usr/share/icons/hicolor/32x32/apps/posture-pet.png"
+  cp -f "$ROOT_DIR/src-tauri/icons/128x128.png" "$stage/usr/share/icons/hicolor/128x128/apps/posture-pet.png"
+  cp -f "$ROOT_DIR/src-tauri/icons/128x128@2x.png" "$stage/usr/share/icons/hicolor/256x256@2/apps/posture-pet.png"
+
+  cat > "$stage/usr/share/applications/posture-pet.desktop" << 'EOF'
+[Desktop Entry]
+Categories=Utility;
+Comment=PosturePet 2.0 — Desktop Virtual Pet & Posture Companion
+Exec=posture-pet
+Icon=posture-pet
+Name=PosturePet 2.0
+Terminal=false
+Type=Application
+EOF
+
+  cat > "$stage/DEBIAN/control" << EOF
+Package: posture-pet
+Version: ${version}
+Architecture: amd64
+Maintainer: PosturePet Team <support@posturepet.app>
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1 | libappindicator3-1, librsvg2-2, libgl1, libglib2.0-0
+Description: PosturePet 2.0 — Desktop Virtual Pet & Posture Companion
+EOF
+
+  dpkg-deb --root-owner-group --build "$stage" "$deb_out"
+  rm -rf "$stage"
+}
+
 if [ "$OS_NAME" = "Linux" ]; then
   # Keep .deb as the required Linux deliverable. AppImage and RPM tooling can
   # vary by runner/distro, so a failure in either optional format must not
   # prevent the reliable Debian package from being published.
-  build_bundle deb
+  if ! build_bundle deb; then
+    echo "Warning: tauri deb bundler failed — falling back to dpkg-deb packaging..."
+  fi
+
+  has_deb=0
+  for deb_file in "$ROOT_DIR/src-tauri/target/release/bundle/deb"/*.deb; do
+    if [ -e "$deb_file" ]; then
+      has_deb=1
+      break
+    fi
+  done
+  if [ "$has_deb" -eq 0 ]; then
+    build_deb_fallback
+  fi
 
   if command -v rpmbuild >/dev/null 2>&1; then
     if ! build_bundle rpm; then

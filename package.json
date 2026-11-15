@@ -1,7 +1,7 @@
 {
   "name": "posture-pet",
   "private": true,
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "PosturePet 2.0 — Desktop Virtual Pet & Posture Companion",
   "author": "PosturePet Team",
   "type": "module",

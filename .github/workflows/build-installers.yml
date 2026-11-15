@@ -104,6 +104,23 @@ jobs:
             done
           fi
 
+      - name: Surface Unix build failure details
+        if: failure() && matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          log="build-${{ matrix.os_label }}.log"
+          if [ -f "$log" ]; then
+            echo "Last build output from $log:"
+            tail -n 60 "$log"
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              safe="${safe//$'\n'/'%0A'}"
+              echo "::error file=$log::$safe"
+            done < <(tail -n 20 "$log")
+          fi
+
       - name: Build Windows detector & NSIS installer
         if: matrix.platform == 'windows-latest'
         shell: pwsh

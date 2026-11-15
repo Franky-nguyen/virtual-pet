@@ -243,4 +243,4 @@ sudo pacman -S --needed \
   ```bash
   python3 detector.py
   ```
-  It downloads `pose_landmarker_heavy.task` to `~/.cache/posturepet/` if the app folder is read-only and serves on `ws://localhost:8765`.
+  Dont ask me questions

@@ -200,9 +200,13 @@ if [ "$OS_NAME" = "Darwin" ]; then
 else
   for subdir in deb rpm appimage; do
     for f in "$BUNDLE_DIR/$subdir"/*; do
-      [ -e "$f" ] || continue
-      cp -f "$f" PosturePet_Installer/
-      copied=$((copied + 1))
+      [ -f "$f" ] || continue
+      case "$f" in
+        *.deb|*.rpm|*.AppImage)
+          cp -f "$f" PosturePet_Installer/
+          copied=$((copied + 1))
+          ;;
+      esac
     done
   done
 fi

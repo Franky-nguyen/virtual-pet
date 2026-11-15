@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Button } from './ui/button'
 import { XIcon } from './icons'
+import PetEnvironment from './PetEnvironment'
 import {
   ALLOWED_PHOTO_MIME_TYPES,
   PET_CREATION_STAGES,
@@ -679,15 +680,18 @@ export default function CreatePetModal({
                       key={key}
                       className="flex flex-col items-center rounded-lg border border-border bg-muted/30 p-2"
                     >
-                      <div className="w-16 h-16 flex items-center justify-center overflow-hidden">
-                        <div
-                          className="sprite-base"
-                          style={{
-                            '--frame-size': `${spec.tileWidth}px`,
-                            '--frames': `${spec.frames}`,
-                            backgroundImage: `url("${url}")`,
-                          } as React.CSSProperties}
-                        />
+                      <div className="w-16 h-16 rounded-md flex items-center justify-center overflow-hidden">
+                        <PetEnvironment variant="mini">
+                          <div
+                            className="sprite-base"
+                            style={{
+                              '--frame-size': `${spec.tileWidth}px`,
+                              '--frames': `${spec.frames}`,
+                              backgroundImage: `url("${url}")`,
+                              transform: 'translateY(2px)',
+                            } as React.CSSProperties}
+                          />
+                        </PetEnvironment>
                       </div>
                       <span className="mt-1 text-[11px] font-semibold text-foreground">
                         {label}

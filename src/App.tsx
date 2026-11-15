@@ -1,9 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { invoke, isTauri } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import PetDisplay from './components/PetDisplay'
 import DebugPanel, { type DebugMetrics } from './components/DebugPanel'
 import WardrobeModal from './components/WardrobeModal'
 import CreatePetModal from './components/CreatePetModal'
 import PetSelectorModal from './components/PetSelectorModal'
+import GraveyardModal from './components/GraveyardModal'
+import DashboardStatsPanel from './components/DashboardStatsPanel'
 import StretchBreakModal, {
   selectStretch,
   analyzeSlouchHistory,
@@ -13,16 +18,33 @@ import StretchBreakModal, {
   type StretchName,
   type SlouchScores,
 } from './components/StretchBreakModal'
+import {
+  initializeOrMigrateLifecycle,
+  startNewPetLife,
+  updateActiveLifePetPack,
+  recordXpChange,
+  recordPetDeath,
+  recordPostureSample,
+  recordSessionResult,
+  estimateDeviationDegree,
+  isDeceasedPetName,
+  loadActiveLife,
+  loadGraves,
+  type ActivePetLife,
+  type PetGrave,
+  type XpEventSource,
+} from './utils/petLifecycle'
 import { Card } from './components/ui/card'
 import { Button } from './components/ui/button'
 import { ChevronUpIcon, ChevronDownIcon, XIcon, VolumeOnIcon, VolumeOffIcon, PaletteIcon, FlowerIcon } from './components/icons'
 import type { PostureData } from './types/electron'
 import type { AccessoryType } from './types/accessories'
-import { ANIMATION_FRAMES, EVOLVED_ANIMATION_FRAMES, EVOLUTION_FRAME_MS } from './types/accessories'
+import { ANIMATION_FRAMES, EVOLVED_ANIMATION_FRAMES, EVOLUTION_FRAME_MS, isAccessoryUnlocked } from './types/accessories'
 import { BUILTIN_PET_ID, getBuiltinPetModel, isBuiltinPetId, type RuntimeCustomPet } from './types/customPet'
 import { listInstalledCustomPets, deleteInstalledCustomPet } from './utils/customPetBridge'
-import { playStart, playReset, playCalibrate, playPop, playToggle } from './utils/soundEffects'
+import { playStart, playReset, playCalibrate, playPop, playToggle, playPetAlertSound, setPetAlertVolume, getPetAlertVolume } from './utils/soundEffects'
 import { playBGM, pauseBGM, skipTrack, setVolume, getVolume } from './utils/bgm'
+import appLogoUrl from './assets/logo.png'
 
 export {
   selectStretch,
@@ -38,6 +60,12 @@ export {
 export const SLOUCH_AUTO_BREAK_MS = 5 * 60 * 1000
 const SLOUCH_HISTORY_MAX = 60
 const SLOUCH_ACCUM_TICK_MS = 1000
+
+// ── Continuous HP loss alert threshold ──────────────────────────────────────
+// When the pet loses too much HP continuously without stopping (every 5 HP lost
+// in a continuous slouch streak), play the pet's animal noise (dog bark / cat meow)
+// and trigger the attack animation so users in deep work notice their pet is hurting.
+export const CONTINUOUS_HP_ALERT_THRESHOLD = 5
 
 // ── XP / Leveling Configuration ────────────────────────────────────────────────
 // XP rates per tick (every 500 ms)
@@ -164,6 +192,48 @@ function App() {
   })
   // Level is derived from xp via getLevelProgress - no separate state needed
   const [mode, setMode] = useState<'dashboard' | 'taskbar'>('dashboard')
+  // ── Pet name & memorial registry (naming required on first open & adoption) ─
+  const [petName, setPetName] = useState<string>(() => {
+    return (localStorage.getItem('posturepet-pet-name') || '').trim()
+  })
+  const [deceasedPetNames, setDeceasedPetNames] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('posturepet-deceased-names')
+      const parsed = saved ? JSON.parse(saved) : []
+      return Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string') : []
+    } catch {
+      return []
+    }
+  })
+  const [namingModalOpen, setNamingModalOpen] = useState<boolean>(() => {
+    return !(localStorage.getItem('posturepet-pet-name') || '').trim()
+  })
+  const [isAdoptingPending, setIsAdoptingPending] = useState(false)
+  const [nameInput, setNameInput] = useState('')
+  const [nameError, setNameError] = useState<string | null>(null)
+  const [activeLife, setActiveLife] = useState<ActivePetLife | null>(() => loadActiveLife())
+  const [graves, setGraves] = useState<PetGrave[]>(() => loadGraves())
+  const [graveyardOpen, setGraveyardOpen] = useState(false)
+  const [statsRefreshTick, setStatsRefreshTick] = useState(0)
+
+  const xpRef = useRef(xp)
+  useEffect(() => { xpRef.current = xp }, [xp])
+  const activeLifeRef = useRef<ActivePetLife | null>(activeLife)
+  useEffect(() => { activeLifeRef.current = activeLife }, [activeLife])
+  const workSessionStartRef = useRef<{ startedAt: string; plannedSeconds: number } | null>(null)
+  const deathRecordedLifeIdRef = useRef<string | null>(null)
+  const lifecycleMigratedRef = useRef(false)
+
+  useEffect(() => {
+    if (petName) {
+      localStorage.setItem('posturepet-pet-name', petName)
+    }
+  }, [petName])
+
+  useEffect(() => {
+    localStorage.setItem('posturepet-deceased-names', JSON.stringify(deceasedPetNames))
+  }, [deceasedPetNames])
+
   // Pet color: CSS hue-rotate angle applied to the sprite layers (0 = default yellow/orange)
   const [petHue, setPetHue] = useState<number>(0)
 
@@ -293,8 +363,10 @@ function App() {
     setPostureStatus('calibrating')
     playCalibrate()
 
-    if (window.electronAPI) {
-      window.electronAPI.calibratePosture()
+    if (isTauri()) {
+      invoke('calibrate_posture').catch((err) => {
+        console.error('[renderer] calibrate_posture invoke failed:', err)
+      })
     } else if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ command: 'calibrate' }))
     }
@@ -329,10 +401,12 @@ function App() {
   // confirmation can never resize the window for an outdated mode.
   useEffect(() => {
     console.log('[renderer] mode state changed ->', mode)
-    if (!window.electronAPI?.confirmUIReady) return
+    if (!isTauri()) return
     const timer = setTimeout(() => {
       console.log(`[renderer] confirming UI ready for mode: ${mode}`)
-      window.electronAPI.confirmUIReady(mode)
+      invoke('ui_ready', { targetMode: mode }).catch((err) => {
+        console.error('[renderer] ui_ready invoke failed:', err)
+      })
     }, 15)
     return () => clearTimeout(timer)
   }, [mode])
@@ -392,8 +466,76 @@ function App() {
     ? null
     : customPets.find((p) => p.manifest.id === selectedPetId) ?? null
 
-  // Only the built-in Original Dog can evolve; Pixel Cat and Custom Pets cannot evolve.
-  const canCurrentPetEvolve = !activeCustomPet && activeBuiltinModel === 'dog'
+  // Both built-in Original Dog and Pixel Cat can evolve; Custom Pets cannot evolve.
+  const canCurrentPetEvolve = !activeCustomPet && (activeBuiltinModel === 'dog' || activeBuiltinModel === 'cat')
+
+  const currentSpecies =
+    activeCustomPet?.manifest.species ??
+    (activeBuiltinModel === 'cat' ? 'cat' : 'dog')
+
+  // Migrate legacy saves once when custom pet packs have finished loading
+  useEffect(() => {
+    if (!customPetsLoaded || lifecycleMigratedRef.current) return
+    lifecycleMigratedRef.current = true
+    const migrated = initializeOrMigrateLifecycle({
+      currentName: petName,
+      petId: selectedPetId,
+      species: currentSpecies,
+      currentXp: xpRef.current,
+      currentHealth: health,
+      legacyDeceasedNames: deceasedPetNames,
+    })
+    activeLifeRef.current = migrated.activeLife
+    setActiveLife(migrated.activeLife)
+    setGraves(migrated.graves)
+    setDeceasedPetNames(migrated.deceasedNames)
+    setStatsRefreshTick((t) => t + 1)
+  }, [customPetsLoaded, petName, selectedPetId, currentSpecies, health, deceasedPetNames])
+
+  // Switching visual pet packs keeps the current life alive and updates its pack metadata
+  useEffect(() => {
+    if (health <= 0 || !activeLifeRef.current) return
+    const updated = updateActiveLifePetPack(activeLifeRef.current, {
+      petId: selectedPetId,
+      species: currentSpecies,
+    })
+    if (updated && updated !== activeLifeRef.current) {
+      activeLifeRef.current = updated
+      setActiveLife(updated)
+    }
+  }, [selectedPetId, currentSpecies, health])
+
+  const applyXpDelta = useCallback((delta: number, source: XpEventSource) => {
+    if (healthRef.current <= 0) return
+    const prev = xpRef.current
+    const model = activeBuiltinModelRef.current
+    const isCurrentEvolved =
+      model === 'cat'
+        ? catEvolvedRef.current
+        : model === 'dog'
+          ? dogEvolvedRef.current
+          : false
+    const minXp = isCurrentEvolved ? getCumulativeXpForLevel(10) : 0
+    const nextXp = Math.max(minXp, prev + delta)
+    if (nextXp === prev && delta <= 0) return
+    xpRef.current = nextXp
+    setXp(nextXp)
+    const nextLevel = getLevelProgress(nextXp).level
+    const updatedLife = recordXpChange({
+      activeLife: activeLifeRef.current,
+      deltaXp: delta,
+      nextXp,
+      nextLevel,
+      source,
+    })
+    if (updatedLife !== activeLifeRef.current) {
+      activeLifeRef.current = updatedLife
+      setActiveLife(updatedLife)
+    }
+    if (source !== 'posture') {
+      setStatsRefreshTick((t) => t + 1)
+    }
+  }, [])
 
   const handlePetInstalled = useCallback((pet: RuntimeCustomPet, selectImmediately: boolean) => {
     setCustomPets((prev) => {
@@ -470,8 +612,10 @@ function App() {
   // VideoCapture handle instead of silently ignoring frames. Re-enabled as soon
   // as the user leaves Wellness Mode.
   useEffect(() => {
-    if (window.electronAPI?.setCapture) {
-      window.electronAPI.setCapture(!wellnessMode)
+    if (isTauri()) {
+      invoke('set_capture', { enabled: !wellnessMode }).catch((err) => {
+        console.error('[renderer] set_capture invoke failed:', err)
+      })
     } else if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ command: 'capture', enabled: !wellnessMode }))
     }
@@ -505,7 +649,10 @@ function App() {
   const [breakDuration, setBreakDuration] = useState(5)  // minutes
   const [soundEnabled, setSoundEnabled] = useState(true)
   const [bgmVolume, setBgmVolume] = useState(() => getVolume())
+  const [petAlertVolume, setPetAlertVolumeState] = useState(() => getPetAlertVolume())
   const [timeLeft, setTimeLeft] = useState(45 * 60)      // seconds
+  const timeLeftRef = useRef(timeLeft)
+  useEffect(() => { timeLeftRef.current = timeLeft }, [timeLeft])
   const [isRunning, setIsRunning] = useState(false)
 
   // ── UC-4 steps 3-4: 15-minute "Quick Check" during an active focus session ──
@@ -582,18 +729,49 @@ function App() {
   useEffect(() => { healthRef.current = health }, [health])
 
   // ── Evolution (Level 10) tracking ─────────────────────────────────────────
-  // isEvolved is persisted so the one-time evolution permanently survives
-  // restarts. isEvolving is transient — it only lives for the 1.05s animation.
-  const [isEvolved, setIsEvolved] = useState<boolean>(() => localStorage.getItem('pet-evolved') === '1')
+  // Persist evolution independently per built-in pet so evolving the Dog does
+  // not hide the Evolve button for Pixel Cat (and vice versa).
+  const [dogEvolved, setDogEvolved] = useState<boolean>(() => localStorage.getItem('pet-evolved') === '1')
+  const [catEvolved, setCatEvolved] = useState<boolean>(() => localStorage.getItem('posturepet-cat-evolved') === '1')
   const [isEvolving, setIsEvolving] = useState(false)
 
-  // Persist the evolved flag immediately (same pattern as health/xp saves).
-  useEffect(() => {
-    localStorage.setItem('pet-evolved', isEvolved ? '1' : '0')
-  }, [isEvolved])
+  const activeBuiltinModelRef = useRef(activeBuiltinModel)
+  const dogEvolvedRef = useRef(dogEvolved)
+  const catEvolvedRef = useRef(catEvolved)
+  useEffect(() => { activeBuiltinModelRef.current = activeBuiltinModel }, [activeBuiltinModel])
+  useEffect(() => { dogEvolvedRef.current = dogEvolved }, [dogEvolved])
+  useEffect(() => { catEvolvedRef.current = catEvolved }, [catEvolved])
 
-  // Holds the evolution timer so it can be cancelled on adopt.
+  useEffect(() => {
+    localStorage.setItem('pet-evolved', dogEvolved ? '1' : '0')
+  }, [dogEvolved])
+
+  useEffect(() => {
+    localStorage.setItem('posturepet-cat-evolved', catEvolved ? '1' : '0')
+  }, [catEvolved])
+
+  const isEvolved = activeBuiltinModel === 'cat' ? catEvolved : dogEvolved
+  const setIsEvolved = useCallback((val: boolean) => {
+    if (activeBuiltinModel === 'cat') {
+      setCatEvolved(val)
+    } else {
+      setDogEvolved(val)
+    }
+  }, [activeBuiltinModel])
+
+  // Holds the evolution timer so it can be cancelled on adopt or pet switch.
   const evolutionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    if (isEvolving) {
+      setIsEvolving(false)
+      if (evolutionTimerRef.current) {
+        clearTimeout(evolutionTimerRef.current)
+        evolutionTimerRef.current = null
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPetId])
 
   // ── UC-5 (P7): Slouch region score history (camera mode only) ───────────────
   const slouchHistoryRef = useRef<SlouchScores[]>([])
@@ -608,13 +786,14 @@ function App() {
     }
   }, [])
 
-  // ── Posture listener: Electron IPC (preferred) or direct WebSocket fallback ──
+  // ── Posture listener: Tauri IPC (preferred) or direct WebSocket fallback ──
   useEffect(() => {
-    if (window.electronAPI) {
-      // Electron path — data arrives already parsed as PostureData. Debug
+    if (isTauri()) {
+      // Tauri path — data arrives already parsed as PostureData. Debug
       // frames (annotated JPEG + metrics) are routed to the overlay instead
       // of the posture status pipeline.
-      window.electronAPI.onPostureUpdate((data: PostureData) => {
+      const unlistenPromise = listen<PostureData>('posture-update', (event) => {
+        const data = event.payload
         if (isDebugFrame(data)) {
           const frame = data as DebugFrame
           setDebugFrame(frame.data ?? null)
@@ -644,7 +823,7 @@ function App() {
         }
       })
       return () => {
-        window.electronAPI.removePostureListener()
+        unlistenPromise.then((unlisten) => unlisten())
         if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
       }
     }
@@ -704,12 +883,15 @@ function App() {
   // renderer always stays in sync with the actual OS window state, regardless
   // of which code path triggered the change.
   useEffect(() => {
-    if (!window.electronAPI?.onModeChanged) return
+    if (!isTauri()) return
     console.log('[renderer] registering onModeChanged listener (channel: mode-changed)')
-    window.electronAPI.onModeChanged((newMode) => {
-      console.log('[renderer] received mode-changed IPC:', newMode)
-      setMode(newMode)
+    const unlistenPromise = listen<'dashboard' | 'taskbar'>('mode-changed', (event) => {
+      console.log('[renderer] received mode-changed IPC:', event.payload)
+      setMode(event.payload)
     })
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten())
+    }
   }, [])
 
 
@@ -718,19 +900,24 @@ function App() {
   // when the tray's "Minimize to Tray" shrinks the window.  It mirrors the
   // force-restore-ui pattern for the opposite direction.
   useEffect(() => {
-    if (!window.electronAPI?.onForceTaskbarUI) return
+    if (!isTauri()) return
     console.log('[renderer] registering onForceTaskbarUI listener (channel: force-taskbar-ui)')
-    window.electronAPI.onForceTaskbarUI(() => {
+    const unlistenPromise = listen('force-taskbar-ui', () => {
       console.log('[renderer] received force-taskbar-ui IPC — forcing taskbar mode')
       setMode('taskbar')
     })
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten())
+    }
   }, [])
 
   /** Send the calibration command through the active transport. */
   const sendCalibrate = useCallback(() => {
     playCalibrate()
-    if (window.electronAPI) {
-      window.electronAPI.calibratePosture()
+    if (isTauri()) {
+      invoke('calibrate_posture').catch((err) => {
+        console.error('[renderer] calibrate_posture invoke failed:', err)
+      })
       return
     }
 
@@ -741,8 +928,10 @@ function App() {
 
   /** Send the debug-stream toggle through the active transport. */
   const sendDebug = useCallback((enabled: boolean) => {
-    if (window.electronAPI?.setDebug) {
-      window.electronAPI.setDebug(enabled)
+    if (isTauri()) {
+      invoke('set_debug', { enabled }).catch((err) => {
+        console.error('[renderer] set_debug invoke failed:', err)
+      })
       return
     }
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -799,25 +988,21 @@ function App() {
   // 'app-hidden'; on the second press (or a tray click) it shows the window
   // again and sends 'app-restored'. This is separate from the dashboard ⇄
   // taskbar widget snap — the layout is left exactly as it was.
-  const isRunningRef = useRef(isRunning)
-  useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
-  // Remembered across a hide so the timer resumes only if it was ticking.
-  const timerWasRunningRef = useRef(false)
+  // Hiding the window should only stop posture tracking. The timer, music and
+  // other background work continue; posture-driven HP/XP loops use this ref to
+  // stay frozen while the camera is paused.
+  const appHiddenRef = useRef(false)
 
   useEffect(() => {
-    const api = window.electronAPI
-    if (!api?.onAppHidden || !api?.onAppRestored) return
+    if (!isTauri()) return
 
-    api.onAppHidden(() => {
-      console.log('[renderer] received app-hidden — pausing camera, timer and BGM')
-      timerWasRunningRef.current = isRunningRef.current
-      setIsRunning(false)
-      pauseBGM()
+    const unlistenHiddenPromise = listen('app-hidden', () => {
+      console.log('[renderer] received app-hidden — pausing posture tracking only')
+      appHiddenRef.current = true
       // Pause the webcam even in camera mode; Wellness Mode already had it off.
-      if (api.setCapture) api.setCapture(false)
-      else if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ command: 'capture', enabled: false }))
-      }
+      invoke('set_capture', { enabled: false }).catch((err) => {
+        console.error('[renderer] set_capture invoke failed:', err)
+      })
       // No frames arrive while the window is hidden, so park the pet on a
       // neutral status instead of freezing (and draining) the last one. Drop
       // any pending debounced status first, otherwise it would flush after the
@@ -830,35 +1015,52 @@ function App() {
       setPostureStatus('unknown')
     })
 
-    api.onAppRestored(() => {
-      console.log('[renderer] received app-restored — restoring camera/timer')
+    const unlistenRestoredPromise = listen('app-restored', () => {
+      console.log('[renderer] received app-restored — restoring posture tracking')
+      appHiddenRef.current = false
       // Wellness Mode is camera-free, so only re-enable capture outside it.
       if (!wellnessModeRef.current) {
-        if (api.setCapture) api.setCapture(true)
-        else if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ command: 'capture', enabled: true }))
-        }
-      }
-      // Resume only if the timer was running when the window was hidden.
-      if (timerWasRunningRef.current) {
-        timerWasRunningRef.current = false
-        playBGM()
-        setIsRunning(true)
+        invoke('set_capture', { enabled: true }).catch((err) => {
+          console.error('[renderer] set_capture invoke failed:', err)
+        })
       }
     })
+
+    return () => {
+      unlistenHiddenPromise.then((unlisten) => unlisten())
+      unlistenRestoredPromise.then((unlisten) => unlisten())
+    }
   }, [])
 
   useEffect(() => {
     const id = setInterval(() => {
-      if (wellnessModeRef.current) return
+      if (appHiddenRef.current || wellnessModeRef.current || healthRef.current <= 0) return
       const status = postureRef.current
       if (status === 'good') {
-        setXp(prev => prev + XP_GAIN)
+        applyXpDelta(XP_GAIN, 'posture')
       } else if (status === 'slouching') {
-        setXp(prev => Math.max(0, prev - XP_DRAIN))
+        applyXpDelta(-XP_DRAIN, 'posture')
       }
       // 'away' / 'unknown' / 'calibrating' -> XP frozen
     }, 500)
+
+    return () => clearInterval(id)
+  }, [applyXpDelta])
+
+  // ── Controlled 5-second posture history sampling (skipped in Wellness Mode) ─
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (appHiddenRef.current || wellnessModeRef.current || healthRef.current <= 0) return
+      const raw = postureRef.current
+      const mappedStatus: 'good' | 'slouching' | 'away' | 'unknown' =
+        raw === 'good' || raw === 'slouching' || raw === 'away' ? raw : 'unknown'
+      recordPostureSample({
+        timestamp: new Date().toISOString(),
+        status: mappedStatus,
+        deviationDegree: estimateDeviationDegree(latestSlouchScoresRef.current),
+      })
+      setStatsRefreshTick((t) => t + 1)
+    }, 5000)
 
     return () => clearInterval(id)
   }, [])
@@ -872,22 +1074,52 @@ function App() {
     localStorage.setItem('pet-xp', xp.toString());
   }, [health, xp]);
 
+  // ── Continuous HP loss alert (animal noise + attack animation) ──────────────
+  // Tracks how much HP has been lost continuously without stopping. When it
+  // reaches CONTINUOUS_HP_ALERT_THRESHOLD (every 5 HP lost while slouching),
+  // play the pet's animal noise (dog bark or cat meow) and trigger the attack
+  // animation so users in deep work notice their pet is taking heavy damage.
+  const continuousHpLossRef = useRef(0)
+  const activePetSoundType: 'dog' | 'cat' =
+    activeCustomPet?.manifest.species === 'cat' || activeBuiltinModel === 'cat'
+      ? 'cat'
+      : 'dog'
+  const activePetSoundTypeRef = useRef<'dog' | 'cat'>(activePetSoundType)
+  useEffect(() => {
+    activePetSoundTypeRef.current = activePetSoundType
+  }, [activePetSoundType])
+
+  const triggerPetHpAlert = useCallback(() => {
+    playPetAlertSound(activePetSoundTypeRef.current)
+    window.dispatchEvent(new CustomEvent('pet:notify'))
+  }, [])
+
   // ── Health drain / regen loop (every 3s, driven by posture) ──────────────
   // Permadeath: at 0 HP the loop freezes — no drain, no regen — until the
   // user adopts a new dog.
   useEffect(() => {
     const id = setInterval(() => {
+      if (appHiddenRef.current) return
       if (healthRef.current <= 0) return // dead: do nothing
       const status = postureRef.current
       if (status === 'slouching') {
-        setHealth(prev => Math.max(0, prev - 1))
+        const nextHp = Math.max(0, healthRef.current - 1)
+        setHealth(nextHp)
+        continuousHpLossRef.current += 1
+        if (nextHp > 0 && continuousHpLossRef.current >= CONTINUOUS_HP_ALERT_THRESHOLD) {
+          continuousHpLossRef.current = 0
+          triggerPetHpAlert()
+        }
       } else if (status === 'good') {
+        continuousHpLossRef.current = 0
         setHealth(prev => Math.min(100, Math.max(0, prev + 1)))
+      } else {
+        continuousHpLossRef.current = 0
       }
     }, 3000)
 
     return () => clearInterval(id)
-  }, [])
+  }, [triggerPetHpAlert])
 
   // ── Pomodoro countdown tick ─────────────────────────────────────────────────
   // One tick per second while running. Clamped at 0 so the countdown can never
@@ -900,18 +1132,69 @@ function App() {
     return () => clearInterval(id)
   }, [isRunning])
 
+  // Track active work session start time once when running a work phase
+  useEffect(() => {
+    if (isRunning && isWorkPhase && workSessionStartRef.current === null) {
+      workSessionStartRef.current = {
+        startedAt: new Date().toISOString(),
+        plannedSeconds: workDuration * 60,
+      }
+    }
+  }, [isRunning, isWorkPhase, workDuration])
+
+  const finalizeInterruptedWorkSession = useCallback((remainingSeconds: number) => {
+    const activeWork = workSessionStartRef.current
+    if (!activeWork) return
+    workSessionStartRef.current = null
+    const elapsedSeconds = Math.max(
+      1,
+      Math.round(activeWork.plannedSeconds - remainingSeconds),
+    )
+    recordSessionResult({
+      activeLife: activeLifeRef.current,
+      startedAt: activeWork.startedAt,
+      durationSeconds: elapsedSeconds,
+      completed: false,
+      interrupted: true,
+    })
+    setStatsRefreshTick((t) => t + 1)
+  }, [])
+
   /** Finish the current phase: stop the timer, award XP, and
    *  switch to the other phase pre-loaded with its full configured duration. */
   const completePhase = useCallback(() => {
     setIsRunning(false)
     pauseBGM()
     const nextIsWork = !isWorkPhase
-    setXp(prev => prev + 25) // XP reward for completing a phase
+    if (isWorkPhase) {
+      const activeWork = workSessionStartRef.current
+      workSessionStartRef.current = null
+      const startedAt =
+        activeWork?.startedAt ??
+        new Date(Date.now() - workDuration * 60 * 1000).toISOString()
+      const durationSeconds = activeWork?.plannedSeconds ?? workDuration * 60
+      const res = recordSessionResult({
+        activeLife: activeLifeRef.current,
+        startedAt,
+        durationSeconds,
+        completed: true,
+        interrupted: false,
+      })
+      if (res.activeLife !== activeLifeRef.current) {
+        activeLifeRef.current = res.activeLife
+        setActiveLife(res.activeLife)
+      }
+    }
+    if (!appHiddenRef.current) {
+      applyXpDelta(25, 'pomodoro') // XP reward for completing a phase
+    } else {
+      setStatsRefreshTick((t) => t + 1)
+    }
     setIsWorkPhase(nextIsWork)
     setTimeLeft((nextIsWork ? workDuration : breakDuration) * 60)
     // Trigger the pet's notification attack animation (works for both puppy and evolved dog)
     window.dispatchEvent(new CustomEvent('pet:notify'))
-  }, [isWorkPhase, workDuration, breakDuration])
+  }, [isWorkPhase, workDuration, breakDuration, applyXpDelta])
 
   // When the countdown hits 0 while running, complete the phase.
   useEffect(() => {
@@ -946,13 +1229,16 @@ function App() {
     slouchElapsedMsRef.current = 0
     slouchHistoryRef.current = []
 
-    // Pause Pomodoro + BGM
+    // Pause Pomodoro + BGM and finalize any active work session as interrupted
+    finalizeInterruptedWorkSession(timeLeftRef.current)
     setIsRunning(false)
     pauseBGM()
 
-    // Pause webcam via setCapture(false)
-    if (window.electronAPI?.setCapture) {
-      window.electronAPI.setCapture(false)
+    // Pause webcam via set_capture(false)
+    if (isTauri()) {
+      invoke('set_capture', { enabled: false }).catch((err) => {
+        console.error('[renderer] set_capture invoke failed:', err)
+      })
     } else if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ command: 'capture', enabled: false }))
     }
@@ -966,7 +1252,7 @@ function App() {
     setPostureStatus('unknown')
 
     setBreakOverlay({ reason, stretchName })
-  }, [])
+  }, [finalizeInterruptedWorkSession])
 
   /**
    * UC-5 (P1): Dismiss the break overlay, restore camera capture via
@@ -979,8 +1265,10 @@ function App() {
     slouchHistoryRef.current = []
 
     const enableCapture = !wellnessModeRef.current
-    if (window.electronAPI?.setCapture) {
-      window.electronAPI.setCapture(enableCapture)
+    if (isTauri()) {
+      invoke('set_capture', { enabled: enableCapture }).catch((err) => {
+        console.error('[renderer] set_capture invoke failed:', err)
+      })
     } else if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ command: 'capture', enabled: enableCapture }))
     }
@@ -1038,6 +1326,7 @@ function App() {
 
   /** Stop the timer and always return to a fresh Work phase (no XP awarded). */
   const handleReset = () => {
+    finalizeInterruptedWorkSession(timeLeftRef.current)
     setIsRunning(false)
     pauseBGM()
     playReset()
@@ -1049,7 +1338,10 @@ function App() {
   const handleSelectWorkDuration = (minutes: number) => {
     playPop()
     setWorkDuration(minutes)
-    if (!isRunning && isWorkPhase) setTimeLeft(minutes * 60)
+    if (!isRunning && isWorkPhase) {
+      finalizeInterruptedWorkSession(timeLeftRef.current)
+      setTimeLeft(minutes * 60)
+    }
   }
 
   /** Apply a break preset; refresh the countdown immediately when idle. */
@@ -1059,30 +1351,119 @@ function App() {
     if (!isRunning && !isWorkPhase) setTimeLeft(minutes * 60)
   }
 
+  /** Adjust only the active countdown; debug controls use this to reach phase
+   * completion quickly without changing the configured duration preset. */
+  const handleAdjustTimer = (minutes: number) => {
+    setTimeLeft(prev => Math.max(0, prev + minutes * 60))
+  }
+
   const currentDurationSeconds = (isWorkPhase ? workDuration : breakDuration) * 60
   const progress = Math.min(100, Math.max(0, ((currentDurationSeconds - timeLeft) / currentDurationSeconds) * 100))
 
-  // ── Permadeath ────────────────────────────────────────────────────────────
+  // ── Permadeath & Naming Gate ──────────────────────────────────────────────
   // health is loaded from (and auto-saved to) localStorage, so the dead state
   // survives application restarts.
   const isDead = health <= 0
 
-  /** Adopt a new dog: restore full HP and XP; the save effect writes it to storage.
-   *  A newly adopted dog starts in its base form and can evolve again.
-   *  Only health, XP and the evolved flags are reset here:
-   *   - The equipped accessory (posturepet_accessory) is kept — never reset to
-   *     'none' on death, evolution or adoption.
-   *   - Wellness data (wellness-* keys, mood, last check, cooldown) is user
-   *     habit data, independent of the pet's life, and is never cleared here. */
-  const handleAdoptNewPet = () => {
-    setHealth(100)
-    setXp(0)
-    setIsEvolved(false)
-    setIsEvolving(false)
-    if (evolutionTimerRef.current) {
-      clearTimeout(evolutionTimerRef.current)
-      evolutionTimerRef.current = null
+  // Record the current pet's grave and retired name the moment HP hits 0.
+  // Idempotent across React rerenders and restarts via deathRecordedLifeIdRef + recordPetDeath.
+  useEffect(() => {
+    if (!isDead) return
+    const life = activeLifeRef.current
+    const fallbackName = petName.trim()
+    if (!life && !fallbackName) return
+
+    const guardKey = life?.id ?? `legacy-${fallbackName.toLowerCase()}`
+    if (deathRecordedLifeIdRef.current === guardKey) return
+    deathRecordedLifeIdRef.current = guardKey
+
+    finalizeInterruptedWorkSession(timeLeftRef.current)
+    setIsRunning(false)
+    pauseBGM()
+    setShowQuickCheck(false)
+    setShowMoodSelector(false)
+    setBreakOverlay(null)
+
+    const { graves: updatedGraves } = recordPetDeath({
+      activeLife: life,
+      fallbackName,
+      petId: selectedPetId,
+      species: currentSpecies,
+      finalXp: xpRef.current,
+      finalLevel: getLevelProgress(xpRef.current).level,
+    })
+
+    activeLifeRef.current = null
+    setActiveLife(null)
+    setGraves(updatedGraves)
+    setStatsRefreshTick((t) => t + 1)
+
+    const retiredName = (life?.name || fallbackName).trim()
+    if (retiredName) {
+      setDeceasedPetNames((prev) =>
+        prev.some((n) => n.toLowerCase() === retiredName.toLowerCase()) ? prev : [...prev, retiredName],
+      )
     }
+  }, [isDead, petName, selectedPetId, currentSpecies, finalizeInterruptedWorkSession])
+
+  /** Trigger adoption flow: require the user to name the new pet before
+   *  resurrecting HP/XP/evolution state, disallowing any deceased pet's name. */
+  const handleAdoptNewPet = () => {
+    const trimmed = petName.trim()
+    if (trimmed) {
+      setDeceasedPetNames((prev) =>
+        prev.some((n) => n.toLowerCase() === trimmed.toLowerCase()) ? prev : [...prev, trimmed],
+      )
+    }
+    setNameInput('')
+    setNameError(null)
+    setIsAdoptingPending(true)
+    setNamingModalOpen(true)
+  }
+
+  /** Validate and commit a new pet name (on first launch or after adoption). */
+  const handleConfirmPetName = (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    const trimmed = nameInput.trim()
+    if (!trimmed) {
+      setNameError('Please enter a name for your pet.')
+      return
+    }
+    if (isDeceasedPetName(trimmed, deceasedPetNames)) {
+      setNameError(`"${trimmed}" has passed away. You cannot give a new pet the same name.`)
+      return
+    }
+    playPop()
+    setPetName(trimmed)
+    const startingNewLife = isAdoptingPending || isDead || !activeLifeRef.current
+    if (isAdoptingPending || isDead) {
+      setHealth(100)
+      xpRef.current = 0
+      setXp(0)
+      setDogEvolved(false)
+      setCatEvolved(false)
+      setIsEvolving(false)
+      if (evolutionTimerRef.current) {
+        clearTimeout(evolutionTimerRef.current)
+        evolutionTimerRef.current = null
+      }
+    }
+    if (startingNewLife) {
+      const freshLife = startNewPetLife({
+        name: trimmed,
+        petId: selectedPetId,
+        species: currentSpecies,
+      })
+      activeLifeRef.current = freshLife
+      setActiveLife(freshLife)
+      deathRecordedLifeIdRef.current = null
+      setStatsRefreshTick((t) => t + 1)
+    }
+    setGraveyardOpen(false)
+    setIsAdoptingPending(false)
+    setNamingModalOpen(false)
+    setNameInput('')
+    setNameError(null)
   }
 
   // ── Wellness mode handlers ──────────────────────────────────────────────────
@@ -1137,7 +1518,7 @@ function App() {
   const handleQuickCheckConfirm = () => {
     if (!tryStartWellnessCooldown()) return
     playPop()
-    setXp(prev => prev + ALIGNED_XP)
+    applyXpDelta(ALIGNED_XP, 'wellness')
     setShowQuickCheck(false)
     // Drives the pet's one-shot "thumbs-up" (attack/reaction) animation.
     window.dispatchEvent(new CustomEvent('pet:notify'))
@@ -1171,12 +1552,28 @@ function App() {
     return moodMessages[Math.floor(Math.random() * moodMessages.length)]
   }
 
+  // Compute level and XP progress from the total accumulated XP.
+  // xp is now the CUMULATIVE total (not per-level), computed via getLevelProgress.
+  const levelData = getLevelProgress(xp)
+  const hasReachedEvolutionLevel = levelData.level >= 10
+
+  // Clear stale evolution flags from a previous pet life whenever the active
+  // living pet has not yet earned enough XP to reach Level 10.
+  useEffect(() => {
+    if (!isDead && !isEvolving && !hasReachedEvolutionLevel && (dogEvolved || catEvolved)) {
+      setDogEvolved(false)
+      setCatEvolved(false)
+    }
+  }, [isDead, isEvolving, hasReachedEvolutionLevel, dogEvolved, catEvolved])
+
   // ── Death animation freeze ────────────────────────────────────────────────
   // The Death layer loops its sprite (`.death-sprite` is `infinite`), so we
   // can't rely on an `animationend` event (infinite loops never fire it).  We
   // time the freeze to exactly one full cycle (frames × 150ms) after the pet
   // dies, then pin the Death sprite on its final frame forever.
   const [deathFrozen, setDeathFrozen] = useState(false)
+  const effectiveIsEvolved = canCurrentPetEvolve && (isDead || hasReachedEvolutionLevel) && isEvolved
+  const effectiveIsEvolving = canCurrentPetEvolve && isEvolving
 
   useEffect(() => {
     if (!isDead) {
@@ -1185,24 +1582,24 @@ function App() {
     }
     const frames = activeCustomPet
       ? (activeCustomPet.manifest.animations.death?.frames ?? 3)
-      : activeBuiltinModel === 'cat'
-        ? ANIMATION_FRAMES.Death
-        : isEvolved
-          ? EVOLVED_ANIMATION_FRAMES.Death
-          : ANIMATION_FRAMES.Death
+      : effectiveIsEvolved
+        ? EVOLVED_ANIMATION_FRAMES.Death
+        : ANIMATION_FRAMES.Death
     const frameMs = activeCustomPet
       ? (activeCustomPet.manifest.animations.death?.frameDurationMs ?? EVOLUTION_FRAME_MS)
       : EVOLUTION_FRAME_MS
     const timer = setTimeout(() => setDeathFrozen(true), frames * frameMs)
     return () => clearTimeout(timer)
-  }, [isDead, isEvolved, activeBuiltinModel, activeCustomPet])
+  }, [isDead, effectiveIsEvolved, activeCustomPet])
 
-  // Compute level and XP progress from the total accumulated XP.
-  // xp is now the CUMULATIVE total (not per-level), computed via getLevelProgress.
-  const levelData = getLevelProgress(xp)
-
-  const effectiveIsEvolved = canCurrentPetEvolve && isEvolved
-  const effectiveIsEvolving = canCurrentPetEvolve && isEvolving
+  // Evolving re-locks the wardrobe until ACCESSORY_REUNLOCK_LEVEL, so an
+  // accessory that is no longer unlocked must not stay equipped. This also
+  // cleans up saves written before the re-lock rule existed.
+  useEffect(() => {
+    if (!isAccessoryUnlocked(selectedAccessory, levelData.level, effectiveIsEvolved)) {
+      setSelectedAccessory('none')
+    }
+  }, [selectedAccessory, levelData.level, effectiveIsEvolved])
 
   useEffect(() => {
     if (!canCurrentPetEvolve && isEvolving) {
@@ -1210,9 +1607,9 @@ function App() {
     }
   }, [canCurrentPetEvolve, isEvolving])
 
-  // ── Level 10 evolution — manual trigger (Original Dog only) ───────────────
+  // ── Level 10 evolution — manual trigger (Original Dog & Pixel Cat) ────────
   // The pet reaches Level 10 passively through XP, but the evolution is
-  // USER-initiated via the "Evolve" button. Pixel Cat and custom pets cannot evolve.
+  // USER-initiated via the "Evolve" button. Custom pets cannot evolve.
   const triggerEvolution = () => {
     if (!canCurrentPetEvolve || isEvolved || isEvolving) return
     // The trigger arpeggio is played by PetDisplay's handleEvolveClick (the
@@ -1222,6 +1619,9 @@ function App() {
       clearTimeout(evolutionTimerRef.current)
       evolutionTimerRef.current = null
     }
+    // Remove wardrobe layers before the cinematic starts. Otherwise the first
+    // evolution frames can still render the old accessory for one paint cycle.
+    setSelectedAccessory('none')
     setIsEvolving(true)
     // animationend (PetDisplay) fires at BLINK_MS + DURATION_MS = 3700ms and
     // sets BOTH isEvolving=false AND isEvolved=true in the same batch.
@@ -1236,6 +1636,10 @@ function App() {
     }
     setIsEvolving(false)
     setIsEvolved(true)
+    // Evolving strips the equipped accessory: the pet comes out of the
+    // evolution with nothing on, and the wardrobe stays locked until
+    // ACCESSORY_REUNLOCK_LEVEL (see isAccessoryUnlocked).
+    setSelectedAccessory('none')
   }
 
   // ── Render based on mode ────────────────────────────────────────────────────
@@ -1268,6 +1672,7 @@ function App() {
             selfReportCooldown={wellnessCooldownLeft}
             petModel={activeBuiltinModel ?? 'dog'}
             customPet={activeCustomPet}
+            petName={petName}
           />
         </div>
 
@@ -1361,13 +1766,20 @@ function App() {
   return (
     <Card
       className="h-screen w-screen overflow-hidden flex flex-col border-none rounded-none bg-background text-foreground shadow-none p-4 animate-in fade-in duration-300"
+      data-tauri-drag-region
       style={{ WebkitAppRegion: 'drag' } as any}
     >
       {/* Draggable header */}
-      <div className="flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-1.5">
-          <h1 className="text-sm font-semibold">PosturePet</h1>
-          <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+      <div className="flex items-center justify-between shrink-0" data-tauri-drag-region>
+        <div className="flex items-center gap-1.5" data-tauri-drag-region>
+          <img
+            src={appLogoUrl}
+            alt="PosturePet"
+            className="h-8 w-auto object-contain select-none"
+            draggable={false}
+            data-tauri-drag-region
+          />
+          <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary" data-tauri-drag-region>
             2.0
           </span>
         </div>
@@ -1394,7 +1806,14 @@ function App() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => { playToggle(); window.close() }}
+            onClick={() => {
+              playToggle()
+              if (isTauri()) {
+                getCurrentWindow().close()
+              } else {
+                window.close()
+              }
+            }}
             title="Close"
             aria-label="Close"
           >
@@ -1515,6 +1934,7 @@ function App() {
               <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
               <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
             </svg>
+            <span className="w-8 shrink-0 text-[10px] font-medium text-muted-foreground">BGM</span>
             <input
               type="range"
               min="0"
@@ -1528,7 +1948,7 @@ function App() {
               }}
               className="flex-1 h-1 accent-primary cursor-pointer"
               aria-label="BGM volume"
-              title={`Volume: ${Math.round(bgmVolume * 100)}%`}
+              title={`BGM Volume: ${Math.round(bgmVolume * 100)}%`}
             />
             <Button
               variant="ghost"
@@ -1544,35 +1964,73 @@ function App() {
               </svg>
             </Button>
           </div>
+
+          {/* Pet alert audio cluster: separate volume slider + preview button */}
+          <div className="flex items-center gap-2 mt-1.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-muted-foreground">
+              <circle cx="11" cy="4" r="2" />
+              <circle cx="18" cy="8" r="2" />
+              <circle cx="20" cy="16" r="2" />
+              <path d="M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 16.84A3.5 3.5 0 0 1 5.5 10Z" />
+            </svg>
+            <span className="w-8 shrink-0 text-[10px] font-medium text-muted-foreground">Pet</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={petAlertVolume}
+              onChange={e => {
+                const v = parseFloat(e.target.value)
+                setPetAlertVolumeState(v)
+                setPetAlertVolume(v)
+              }}
+              className="flex-1 h-1 accent-primary cursor-pointer"
+              aria-label="Pet alert volume"
+              title={`Pet Alert Volume: ${Math.round(petAlertVolume * 100)}%`}
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0"
+              onClick={() => triggerPetHpAlert()}
+              title={activePetSoundType === 'cat' ? 'Test cat meow alert' : 'Test dog bark alert'}
+              aria-label={activePetSoundType === 'cat' ? 'Test cat meow alert' : 'Test dog bark alert'}
+            >
+              <VolumeOnIcon className="size-3.5" />
+            </Button>
+          </div>
         </div>
 
         {/* Stats HUD: flat, handcrafted HP & XP bars */}
         <div className="w-full flex flex-col gap-3 px-4 py-3 bg-slate-50 rounded-xl border border-slate-200">
           {/* HP Bar */}
-          <div className="flex items-center justify-between gap-3">
-            <span className="w-12 shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300">HP</span>
-            <div className="h-2.5 w-full bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
+          <div className="flex items-center gap-3">
+            <span className="w-16 shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300 whitespace-nowrap">
+              HP
+            </span>
+            <div className="h-2.5 flex-1 min-w-0 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
               <div
                 className="h-full bg-red-500 rounded-full transition-all duration-300 ease-in-out"
                 style={{ width: `${health}%` }}
               />
             </div>
-            <span className="shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300 tabular-nums">
+            <span className="w-16 shrink-0 text-right font-medium text-xs text-gray-700 dark:text-gray-300 tabular-nums whitespace-nowrap">
               {health}/100
             </span>
           </div>
           {/* XP Bar */}
-          <div className="flex items-center justify-between gap-3">
-            <span className="w-12 shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300">
+          <div className="flex items-center gap-3">
+            <span className="w-16 shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300 whitespace-nowrap">
               Lv.{levelData.level} XP
             </span>
-            <div className="h-2.5 w-full bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
+            <div className="h-2.5 flex-1 min-w-0 bg-gray-200 dark:bg-slate-700 rounded-full overflow-hidden">
               <div
                 className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-in-out"
                 style={{ width: `${levelData.progressPercent}%` }}
               />
             </div>
-            <span className="shrink-0 font-medium text-xs text-gray-700 dark:text-gray-300 tabular-nums">
+            <span className="w-16 shrink-0 text-right font-medium text-xs text-gray-700 dark:text-gray-300 tabular-nums whitespace-nowrap">
               {levelData.currentLevelXp}/{levelData.xpRequired}
             </span>
           </div>
@@ -1615,37 +2073,49 @@ function App() {
               </Button>
             )}
           </div>
-          {/* Pet Selector, Wardrobe & Experimental Create Your Own Pet controls */}
+          {/* Pet Selector, Wardrobe, Graveyard & Experimental Create Your Own Pet controls */}
           <div className="flex flex-col gap-2 pt-1.5 border-t border-slate-200/80">
-            <div className="flex items-center justify-between gap-1.5">
+            <div className="flex items-center justify-between gap-1">
               <Button
                 size="sm"
                 variant="outline"
-                className="gap-1 text-xs h-7 px-2.5"
+                className="gap-1 text-[11px] h-7 px-2 min-w-0 shrink"
                 onClick={() => { playToggle(); setPetSelectorOpen(true) }}
                 title="Switch between built-in and custom pets"
               >
-                <span className="truncate max-w-[120px]">
+                <span className="truncate max-w-[82px]">
                   {activeCustomPet
                     ? activeCustomPet.manifest.name
                     : activeBuiltinModel === 'cat'
                       ? 'Pixel Cat'
                       : 'Original Dog'}
                 </span>
-                <span className="text-[10px] text-muted-foreground">
+                <span className="text-[10px] text-muted-foreground shrink-0">
                   ({customPets.length + 2})
                 </span>
               </Button>
 
-              <Button
-                size="sm"
-                variant="outline"
-                className="gap-1 text-xs h-7 px-2.5"
-                onClick={() => { playToggle(); setWardrobeOpen(true) }}
-              >
-                <PaletteIcon className="size-3.5" />
-                Wardrobe
-              </Button>
+              <div className="flex items-center gap-1 shrink-0">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1 text-[11px] h-7 px-2 shrink-0"
+                  onClick={() => { playToggle(); setWardrobeOpen(true) }}
+                >
+                  <PaletteIcon className="size-3" />
+                  Wardrobe
+                </Button>
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1 text-[11px] h-7 px-2 shrink-0"
+                  onClick={() => { playToggle(); setGraveyardOpen(true) }}
+                  title="Visit Digital Pet Graveyard"
+                >
+                  Graveyard ({graves.length})
+                </Button>
+              </div>
             </div>
 
             {/* Experimental Feature: Create Your Own Pet */}
@@ -1690,6 +2160,28 @@ function App() {
           selfReportCooldown={wellnessCooldownLeft}
           petModel={activeBuiltinModel ?? 'dog'}
           customPet={activeCustomPet}
+          petName={petName}
+          onOpenGraveyard={() => { playToggle(); setGraveyardOpen(true) }}
+        />
+
+        {/* Posture & Work Dashboard Statistics (Click to inspect All-Time & Weekly History) */}
+        <DashboardStatsPanel
+          activeLife={activeLife}
+          currentXp={xp}
+          currentLevel={levelData.level}
+          refreshTick={statsRefreshTick}
+        />
+
+        {/* Digital Pet Graveyard Modal */}
+        <GraveyardModal
+          open={graveyardOpen}
+          onClose={() => setGraveyardOpen(false)}
+          graves={graves}
+          isDead={isDead}
+          onAdoptNewPet={() => {
+            setGraveyardOpen(false)
+            handleAdoptNewPet()
+          }}
         />
 
         {/* Create Your Own Pet modal */}
@@ -1743,13 +2235,28 @@ function App() {
           metrics={debugMetrics}
           status={debugStatus}
           onClose={toggleDebug}
-          onAddXp={() =>
-            setXp((prev) => {
-              const { level } = getLevelProgress(prev)
-              return prev + Math.max(500, getXpRequiredForLevel(level))
+          onAddXp={() => {
+            const { level } = getLevelProgress(xpRef.current)
+            applyXpDelta(Math.max(500, getXpRequiredForLevel(level)), 'debug')
+          }}
+          onDamage={() => {
+            setHealth(prev => {
+              const next = Math.max(0, prev - 25)
+              if (next > 0) triggerPetHpAlert()
+              return next
             })
-          }
-          onDamage={() => setHealth(prev => Math.max(0, prev - 25))}
+          }}
+          onAdjustTimer={handleAdjustTimer}
+          onNotify={triggerPetHpAlert}
+          onResetEvolve={() => {
+            setDogEvolved(false)
+            setCatEvolved(false)
+            setIsEvolving(false)
+            if (evolutionTimerRef.current) {
+              clearTimeout(evolutionTimerRef.current)
+              evolutionTimerRef.current = null
+            }
+          }}
         />
 
         {/* Wellness mode mood selector modal */}
@@ -1921,7 +2428,12 @@ function App() {
               {/* Header */}
               <div className="px-5 pt-5 pb-4 border-b border-border">
                 <div className="flex items-center gap-2">
-                  <FlowerIcon className="size-4 text-primary" />
+                  <img
+                    src={appLogoUrl}
+                    alt="PosturePet"
+                    className="h-6 w-auto object-contain select-none shrink-0"
+                    draggable={false}
+                  />
                   <h2 className="text-sm font-semibold leading-none">Set up PosturePet</h2>
                 </div>
                 <p className="mt-1.5 text-xs text-muted-foreground">
@@ -1991,6 +2503,77 @@ function App() {
                   </>
                 )}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Mandatory Pet Naming Modal (first launch & after adopting a new pet) */}
+        {namingModalOpen && (
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 animate-in fade-in duration-150"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pet-naming-title"
+          >
+            <div className="relative z-10 w-full max-w-[calc(100%-2rem)] mx-4 rounded-xl border bg-card text-card-foreground shadow-xl overflow-hidden animate-in zoom-in-95 fade-in duration-150">
+              <div className="px-5 pt-5 pb-4 border-b border-border">
+                <div className="flex items-center gap-2">
+                  <img
+                    src={appLogoUrl}
+                    alt="PosturePet"
+                    className="h-6 w-auto object-contain select-none shrink-0"
+                    draggable={false}
+                  />
+                  <h2 id="pet-naming-title" className="text-sm font-semibold leading-none">
+                    {isAdoptingPending || isDead ? 'Adopt a New Pet' : 'Name Your Pet'}
+                  </h2>
+                </div>
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  {isAdoptingPending || isDead
+                    ? 'Give your new companion a fresh name. Names of pets that passed away cannot be reused.'
+                    : 'Choose a name for your PosturePet companion before getting started.'}
+                </p>
+              </div>
+              <form onSubmit={handleConfirmPetName} className="p-5 flex flex-col gap-3">
+                <div>
+                  <label htmlFor="pet-name-input" className="block text-xs font-medium text-foreground mb-1.5">
+                    Pet Name
+                  </label>
+                  <input
+                    id="pet-name-input"
+                    type="text"
+                    maxLength={24}
+                    autoFocus
+                    value={nameInput}
+                    onChange={(e) => {
+                      setNameInput(e.target.value)
+                      if (nameError) setNameError(null)
+                    }}
+                    placeholder="e.g. Mochi, Biscuit, Luna..."
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  {nameError && (
+                    <p role="alert" className="mt-1.5 text-[11px] font-medium text-destructive">
+                      {nameError}
+                    </p>
+                  )}
+                </div>
+
+                {deceasedPetNames.length > 0 && (
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
+                      In Loving Memory (Cannot Reuse)
+                    </p>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      {deceasedPetNames.join(', ')}
+                    </p>
+                  </div>
+                )}
+
+                <Button type="submit" className="w-full">
+                  {isAdoptingPending || isDead ? 'Adopt & Name Pet' : 'Confirm Name'}
+                </Button>
+              </form>
             </div>
           </div>
         )}

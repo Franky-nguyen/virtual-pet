@@ -57,38 +57,40 @@ if errorlevel 1 (
 rmdir /s /q build_env
 if exist build rmdir /s /q build
 
-echo 6. Compiling TypeScript...
-call npx tsc
+echo 6. Packaging Tauri app + installer (PosturePet 2.0)...
+if not exist detector.exe (
+    echo ERROR: detector.exe is missing - the Tauri bundle references it as a resource.
+    pause
+    exit /b 1
+)
+if not exist pose_landmarker_heavy.task (
+    echo ERROR: pose_landmarker_heavy.task is missing - the detector needs it at runtime.
+    pause
+    exit /b 1
+)
+rem `tauri build` runs `npm run build` (tsc + vite) itself via beforeBuildCommand,
+rem then compiles the Rust shell and embeds the frontend bundle into the exe.
+call npx tauri build
 if errorlevel 1 (
-    echo ERROR: TypeScript compilation failed - see output above.
+    echo ERROR: Tauri packaging failed - see output above.
     pause
     exit /b 1
 )
 
-echo 7. Building Vite frontend bundle...
-call npx vite build
-if errorlevel 1 (
-    echo ERROR: Vite build failed - see output above.
-    pause
-    exit /b 1
-)
-
-echo 8. Packaging Electron Installer (PosturePet 2.0)...
-call npx electron-builder --win
-if errorlevel 1 (
-    echo ERROR: Electron packaging failed - see output above.
-    pause
-    exit /b 1
-)
-
-echo 9. Organizing files and cleaning up heavy build artifacts...
+echo 7. Organizing files and cleaning up heavy build artifacts...
 if exist "PosturePet_Installer" rmdir /s /q "PosturePet_Installer"
 mkdir PosturePet_Installer
-move /y release\*.exe PosturePet_Installer\ >nul 2>&1
+set "NSIS_DIR=src-tauri\target\release\bundle\nsis"
+if exist "%NSIS_DIR%\*.exe" (
+    copy /y "%NSIS_DIR%\*.exe" PosturePet_Installer\ >nul
+) else (
+    echo ERROR: No installer produced in %NSIS_DIR%.
+    pause
+    exit /b 1
+)
 
-rmdir /s /q release
-rmdir /s /q dist
-rmdir /s /q dist-electron
+rem Keep src-tauri\target\release\posture-pet.exe: PosturePet.vbs launches it directly.
+rmdir /s /q dist 2>nul
 if exist build rmdir /s /q build
 if exist build_env rmdir /s /q build_env
 
@@ -96,5 +98,6 @@ echo.
 echo ==========================================
 echo  SUCCESS! PosturePet 2.0 is ready for GitHub.
 echo  Your final Windows installer is in: PosturePet_Installer\
+echo  Portable app: src-tauri\target\release\posture-pet.exe
 echo ==========================================
 pause

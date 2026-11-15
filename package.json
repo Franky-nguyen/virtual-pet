@@ -5,88 +5,40 @@
   "description": "PosturePet 2.0 — Desktop Virtual Pet & Posture Companion",
   "author": "PosturePet Team",
   "type": "module",
-  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && electron-builder",
+    "build": "tsc && vite build",
     "preview": "vite preview",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build": "tsc && vite build && electron-builder"
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
-    "@base-ui/react": "^1.7.0",
-    "@fontsource-variable/eb-garamond": "^5.3.0",
     "@fontsource-variable/noto-sans": "^5.3.0",
-    "@hugeicons/core-free-icons": "^4.3.0",
-    "@hugeicons/react": "^1.1.10",
-    "bufferutil": "^4.1.0",
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-dialog": "^2.2.0",
+    "@tauri-apps/plugin-fs": "^2.2.0",
+    "@tauri-apps/plugin-global-shortcut": "^2.2.0",
+    "@tauri-apps/plugin-notification": "^2.2.0",
+    "@tauri-apps/plugin-os": "^2.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "shadcn": "^4.19.0",
     "tailwind-merge": "^3.6.0",
-    "tw-animate-css": "^1.4.0",
-    "utf-8-validate": "^6.0.6",
-    "ws": "^8.21.3"
+    "tw-animate-css": "^1.4.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
     "@types/node": "^26.2.0",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.0",
-    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.19",
-    "concurrently": "^8.2.2",
-    "cross-env": "^7.0.3",
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.3",
     "typescript": "^5.4.5",
-    "vite": "^5.2.11",
-    "vite-plugin-electron": "^0.28.6",
-    "vite-plugin-electron-renderer": "^0.14.5",
-    "wait-on": "^7.2.0"
-  },
-  "build": {
-    "appId": "com.posturepet.app",
-    "productName": "PosturePet 2.0",
-    "asar": true,
-    "compression": "maximum",
-    "removePackageScripts": true,
-    "files": [
-      "dist/**/*",
-      "dist-electron/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "detector.exe",
-        "to": "detector.exe"
-      },
-      {
-        "from": "fixtures/mochi-cat-pack",
-        "to": "fixtures/mochi-cat-pack"
-      }
-    ],
-    "win": {
-      "target": "nsis"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "perMachine": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "PosturePet 2.0",
-      "artifactName": "PosturePet-2.0-Setup.${ext}"
-    },
-    "directories": {
-      "output": "release"
-    }
-  },
-  "allowScripts": {
-    "electron@31.7.7": true,
-    "esbuild@0.21.5": true
+    "vite": "^5.2.11"
   }
 }

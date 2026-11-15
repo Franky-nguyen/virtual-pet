@@ -1,55 +1,45 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import electron from 'vite-plugin-electron'
-import renderer from 'vite-plugin-electron-renderer'
+
+const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({
+  clearScreen: false,
+  server: {
+    port: 5173,
+    strictPort: true,
+    host: host || false,
+    hmr: host
+      ? {
+          protocol: 'ws',
+          host,
+          port: 1421,
+        }
+      : undefined,
+    watch: {
+      ignored: ['**/src-tauri/**'],
+    },
+  },
   build: {
     target: 'esnext',
     minify: 'esbuild',
     cssMinify: true,
     sourcemap: false,
     reportCompressedSize: false,
-  },
-  plugins: [
-    react(),
-    electron([
-      {
-        entry: 'electron/main.ts',
-        onstart(options) {
-          options.startup()
+    assetsInlineLimit: 0,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: [
+            'react',
+            'react-dom',
+            '@tauri-apps/api/core',
+            '@tauri-apps/api/event',
+            '@tauri-apps/api/window',
+          ],
         },
-        vite: {
-          build: {
-            outDir: 'dist-electron',
-            minify: 'esbuild',
-            sourcemap: false,
-          }
-        }
       },
-      {
-        entry: 'electron/preload.ts',
-        onstart(options) {
-          options.reload()
-        },
-        vite: {
-          build: {
-            outDir: 'dist-electron',
-            minify: 'esbuild',
-            sourcemap: false,
-            lib: {
-              // Sandboxed Electron preloads must be CommonJS. The plugin derives
-              // the format from package.json "type" ("module" → ESM), which the
-              // sandboxed renderer silently refuses to load — killing every
-              // main→renderer IPC channel (force-taskbar-ui, mode-changed, …).
-              entry: 'electron/preload.ts',
-              formats: ['cjs'],
-              fileName: () => '[name].cjs'
-            }
-          }
-        }
-      }
-    ]),
-    renderer()
-  ]
+    },
+  },
+  plugins: [react()],
 })

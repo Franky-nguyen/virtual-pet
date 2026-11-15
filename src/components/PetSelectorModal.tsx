@@ -3,6 +3,7 @@ import { Button } from './ui/button'
 import { XIcon } from './icons'
 import { BUILTIN_DOG_ID, BUILTIN_CAT_ID, type RuntimeCustomPet } from '../types/customPet'
 import { getSpriteUrl } from './PetDisplay'
+import PetEnvironment from './PetEnvironment'
 import { playPop, playToggle } from '../utils/soundEffects'
 
 interface PetSelectorModalProps {
@@ -107,7 +108,7 @@ export default function PetSelectorModal({
               id: BUILTIN_CAT_ID,
               name: 'Pixel Cat',
               model: 'cat' as const,
-              description: 'Supports all 5 Wardrobe accessories (does not evolve)',
+              description: 'Supports Wardrobe accessories & Level 10 evolution',
             },
           ]).map((builtin) => {
             const isSelected = selectedPetId === builtin.id
@@ -131,15 +132,17 @@ export default function PetSelectorModal({
                   className="flex flex-1 items-center gap-3 text-left focus:outline-none"
                 >
                   <div className="w-12 h-12 rounded-lg bg-background border border-border flex items-center justify-center overflow-hidden shrink-0">
-                    <div
-                      className="sprite-base"
-                      style={{
-                        '--frame-size': '64px',
-                        '--frames': `${preview.frames}`,
-                        backgroundImage: `url("${preview.url}")`,
-                        transform: 'scale(0.75)',
-                      } as React.CSSProperties}
-                    />
+                    <PetEnvironment variant="mini">
+                      <div
+                        className="sprite-base"
+                        style={{
+                          '--frame-size': '64px',
+                          '--frames': `${preview.frames}`,
+                          backgroundImage: `url("${preview.url}")`,
+                          transform: 'scale(0.75)',
+                        } as React.CSSProperties}
+                      />
+                    </PetEnvironment>
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
@@ -204,15 +207,17 @@ export default function PetSelectorModal({
                     className="flex flex-1 items-center gap-3 text-left min-w-0 focus:outline-none"
                   >
                     <div className="w-12 h-12 rounded-lg bg-background border border-border flex items-center justify-center overflow-hidden shrink-0">
-                      <div
-                        className="sprite-base"
-                        style={{
-                          '--frame-size': `${idleSpec.tileWidth}px`,
-                          '--frames': `${idleSpec.frames}`,
-                          backgroundImage: `url("${pet.spriteUrls.idle}")`,
-                          transform: 'scale(0.75)',
-                        } as React.CSSProperties}
-                      />
+                      <PetEnvironment variant="mini">
+                        <div
+                          className="sprite-base"
+                          style={{
+                            '--frame-size': `${idleSpec.tileWidth}px`,
+                            '--frames': `${idleSpec.frames}`,
+                            backgroundImage: `url("${pet.spriteUrls.idle}")`,
+                            transform: 'scale(0.75) translateY(2px)',
+                          } as React.CSSProperties}
+                        />
+                      </PetEnvironment>
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">

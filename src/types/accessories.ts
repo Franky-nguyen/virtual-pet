@@ -83,11 +83,16 @@ export function getAccessory(id: AccessoryType): Accessory | undefined {
  *   - Party Hat: Level 4
  *   - Crown: Level 6
  *   - Wizard Hat: Level 8
+ *
+ *  Evolving resets that progress: once the pet has evolved, every accessory is
+ *  locked again until the pet reaches ACCESSORY_REUNLOCK_LEVEL. From that level
+ *  on, the normal per-accessory thresholds above apply once more.
  */
-export function isAccessoryUnlocked(id: AccessoryType, level: number, _isEvolved: boolean = false): boolean {
+export function isAccessoryUnlocked(id: AccessoryType, level: number, isEvolved: boolean = false): boolean {
   if (id === 'none') return true
   const accessory = getAccessory(id)
   if (!accessory) return false
+  if (isEvolved && level < ACCESSORY_REUNLOCK_LEVEL) return false
   return level >= accessory.unlockedAtLevel
 }
 
@@ -160,6 +165,11 @@ export const EVOLVED_TILE_PX = 64
 
 /** XP level at which the pet evolves into its permanent evolved form. */
 export const EVOLUTION_LEVEL = 10
+
+/** Level the evolved pet must reach before accessories unlock again after the
+ *  evolution reset. Evolving strips the equipped accessory and re-locks every
+ *  wardrobe item until this level. */
+export const ACCESSORY_REUNLOCK_LEVEL = 13
 
 /** Milliseconds per sprite frame — must stay in sync with `.sprite-base` (0.15s). */
 export const EVOLUTION_FRAME_MS = 150

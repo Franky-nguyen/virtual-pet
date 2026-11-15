@@ -7,6 +7,9 @@ release/
 # ── Build artifacts & output ─────────────────────────────────
 PosturePet_Installer/
 build_env/
+src-tauri/target/
+src-tauri/gen/
+captures/
 
 # ── Compiled binaries ────────────────────────────────────────
 *.exe

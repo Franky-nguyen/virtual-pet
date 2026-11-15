@@ -1,3 +1,4 @@
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { XIcon } from './icons'
 
 // Telemetry fields pushed by detector.py alongside each debug frame.
@@ -25,6 +26,12 @@ interface DebugPanelProps {
   onAddXp: () => void
   /** Quick test action: -25 HP (identical to the old throwaway dashboard button). */
   onDamage: () => void
+  /** Quick test action: fire the pet alert — animal noise + attack animation. */
+  onNotify: () => void
+  /** Quick test action: adjust the current Pomodoro countdown in minutes. */
+  onAdjustTimer: (minutes: number) => void
+  /** Quick test action: reset evolution state for the active built-in pet. */
+  onResetEvolve?: () => void
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -43,7 +50,7 @@ const STATUS_COLORS: Record<string, string> = {
  * `debug: true` command to the Python backend, closing sends `debug: false`,
  * which keeps CPU at ~zero in normal use.
  */
-export default function DebugPanel({ open, frame, metrics, status, onClose, onAddXp, onDamage }: DebugPanelProps) {
+export default function DebugPanel({ open, frame, metrics, status, onClose, onAddXp, onDamage, onNotify, onAdjustTimer, onResetEvolve }: DebugPanelProps) {
   if (!open) return null
 
   const rows: [string, string][] = []
@@ -109,11 +116,11 @@ export default function DebugPanel({ open, frame, metrics, status, onClose, onAd
       {/* Quick test actions — the old throwaway dashboard buttons, tucked
           inside this drawer. The panel returns null while closed, so these
           can never leak into the consumer-facing UI. */}
-      <div className="flex items-center gap-2 px-3 py-2 border-t border-slate-700">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-t border-slate-700">
         <span className="text-[10px] font-mono font-semibold tracking-widest text-slate-500 uppercase">
           Actions
         </span>
-        <div className="flex gap-2 ml-auto">
+        <div className="flex flex-wrap gap-2 ml-auto">
           <button
             type="button"
             onClick={onAddXp}
@@ -128,9 +135,42 @@ export default function DebugPanel({ open, frame, metrics, status, onClose, onAd
           >
             Debug: -25 HP
           </button>
+          {onResetEvolve && (
+            <button
+              type="button"
+              onClick={onResetEvolve}
+              className="rounded border border-slate-600 bg-slate-800 px-2.5 py-1 font-mono text-[11px] text-emerald-300 hover:bg-slate-700 transition-colors"
+            >
+              Debug: Reset Evolve
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => window.electronAPI?.notify('PosturePet', 'Notification test from the debug menu.')}
+            onClick={() => onAdjustTimer(-5)}
+            className="rounded border border-slate-600 bg-slate-800 px-2.5 py-1 font-mono text-[11px] text-cyan-300 hover:bg-slate-700 transition-colors"
+          >
+            Debug: -5m
+          </button>
+          <button
+            type="button"
+            onClick={() => onAdjustTimer(10)}
+            className="rounded border border-slate-600 bg-slate-800 px-2.5 py-1 font-mono text-[11px] text-cyan-300 hover:bg-slate-700 transition-colors"
+          >
+            Debug: +10m
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              // Same reaction path a real alert uses: animal noise + one-shot
+              // attack animation on the pet.
+              onNotify()
+              if (isTauri()) {
+                invoke('notify', {
+                  title: 'PosturePet',
+                  body: 'Notification test from the debug menu.',
+                }).catch((err) => console.error('[DebugPanel] notify invoke failed:', err))
+              }
+            }}
             className="rounded border border-slate-600 bg-slate-800 px-2.5 py-1 font-mono text-[11px] text-amber-300 hover:bg-slate-700 transition-colors"
           >
             Debug: Notification

@@ -1,10 +1,13 @@
 /**
  * Safe bridge for Custom Pet operations:
- * - In Electron: delegates strictly to the main process via `window.electronAPI`.
+ * - In Tauri desktop runtime: delegates strictly to the Rust backend via `@tauri-apps/api/core` `invoke`
+ *   and `@tauri-apps/api/event` `listen`.
  * - In browser-only dev mode (`vite`): provides a local Canvas fallback so UI development
- *   and previews work without crashing when `window.electronAPI` is absent.
+ *   and previews work without crashing when Tauri IPC is absent.
  */
 
+import { invoke, isTauri } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import type {
   CreateCustomPetRequest,
   CreateCustomPetResult,
@@ -19,8 +22,8 @@ import { NORMALIZED_ANIMATION_SPECS } from '../types/customPet'
 const BROWSER_FALLBACK_STORAGE_KEY = 'posturepet-browser-custom-pets'
 
 export async function listInstalledCustomPets(): Promise<RuntimeCustomPet[]> {
-  if (window.electronAPI?.listCustomPets) {
-    return window.electronAPI.listCustomPets()
+  if (isTauri()) {
+    return invoke<RuntimeCustomPet[]>('custom_pets_list')
   }
   try {
     const raw = localStorage.getItem(BROWSER_FALLBACK_STORAGE_KEY)
@@ -30,9 +33,17 @@ export async function listInstalledCustomPets(): Promise<RuntimeCustomPet[]> {
   }
 }
 
+export async function getInstalledCustomPet(petId: string): Promise<RuntimeCustomPet | null> {
+  if (isTauri()) {
+    return invoke<RuntimeCustomPet | null>('custom_pets_get', { petId })
+  }
+  const existing = await listInstalledCustomPets()
+  return existing.find((p) => p.manifest.id === petId) ?? null
+}
+
 export async function deleteInstalledCustomPet(petId: string): Promise<{ ok: boolean }> {
-  if (window.electronAPI?.deleteCustomPet) {
-    return window.electronAPI.deleteCustomPet(petId)
+  if (isTauri()) {
+    return invoke<{ ok: boolean }>('custom_pets_delete', { petId })
   }
   try {
     const existing = await listInstalledCustomPets()
@@ -47,8 +58,22 @@ export async function deleteInstalledCustomPet(petId: string): Promise<{ ok: boo
 export function subscribeCustomPetProgress(
   callback: (progress: PetCreationProgress) => void,
 ): () => void {
-  if (window.electronAPI?.onCustomPetProgress) {
-    return window.electronAPI.onCustomPetProgress(callback)
+  if (isTauri()) {
+    let unlistenFn: (() => void) | null = null
+    let disposed = false
+    listen<PetCreationProgress>('custom-pets:progress', (event) => {
+      callback(event.payload)
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten()
+      } else {
+        unlistenFn = unlisten
+      }
+    })
+    return () => {
+      disposed = true
+      if (unlistenFn) unlistenFn()
+    }
   }
   const handler = (e: Event) => {
     const detail = (e as CustomEvent<PetCreationProgress>).detail
@@ -100,8 +125,8 @@ function renderBrowserFallbackSheet(
 export async function createCustomPetViaBridge(
   request: CreateCustomPetRequest,
 ): Promise<CreateCustomPetResult> {
-  if (window.electronAPI?.createCustomPet) {
-    return window.electronAPI.createCustomPet(request)
+  if (isTauri()) {
+    return invoke<CreateCustomPetResult>('custom_pets_create', { request })
   }
 
   if ((request.pipeline ?? 'autosprite') === 'autosprite') {
@@ -112,7 +137,7 @@ export async function createCustomPetViaBridge(
     return {
       ok: false,
       code: 'MCP_UNAVAILABLE',
-      error: 'AutoSprite MCP requires the Electron desktop runtime or local synthesizer fallback.',
+      error: 'AutoSprite MCP requires the Tauri desktop runtime or local synthesizer fallback.',
     }
   }
 
@@ -170,13 +195,13 @@ export async function importCustomPetDirectoryViaBridge(meta?: {
   species?: PetSpecies
   breed?: string
 }): Promise<CreateCustomPetResult> {
-  if (window.electronAPI?.importCustomPetDirectory) {
-    return window.electronAPI.importCustomPetDirectory(meta)
+  if (isTauri()) {
+    return invoke<CreateCustomPetResult>('custom_pets_import_directory', { meta: meta ?? null })
   }
   return {
     ok: false,
     code: 'MCP_UNAVAILABLE',
-    error: 'Folder import requires the Electron desktop runtime.',
+    error: 'Folder import requires the Tauri desktop runtime.',
   }
 }
 
@@ -185,8 +210,8 @@ export async function importFixturePetViaBridge(meta?: {
   species?: PetSpecies
   breed?: string
 }): Promise<CreateCustomPetResult> {
-  if (window.electronAPI?.importFixturePet) {
-    return window.electronAPI.importFixturePet(meta)
+  if (isTauri()) {
+    return invoke<CreateCustomPetResult>('custom_pets_import_fixture', { meta: meta ?? null })
   }
   return createCustomPetViaBridge({
     name: meta?.name || 'Mochi',

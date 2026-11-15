@@ -1,6 +1,6 @@
 import { Button } from './ui/button'
 import { XIcon, LockIcon } from './icons'
-import { ACCESSORIES, isAccessoryUnlocked } from '../types/accessories'
+import { ACCESSORIES, isAccessoryUnlocked, ACCESSORY_REUNLOCK_LEVEL } from '../types/accessories'
 import type { AccessoryType } from '../types/accessories'
 import { playPop } from '../utils/soundEffects'
 
@@ -95,7 +95,9 @@ export default function WardrobeModal({
                 }`}
                 title={
                   locked
-                    ? `Unlocks at level ${accessory.unlockedAtLevel}`
+                    ? isEvolved && petLevel < ACCESSORY_REUNLOCK_LEVEL
+                      ? `Locked until level ${ACCESSORY_REUNLOCK_LEVEL} after evolving`
+                      : `Unlocks at level ${accessory.unlockedAtLevel}`
                     : equipped
                     ? `Equipped: ${accessory.name}`
                     : accessory.name
@@ -112,7 +114,9 @@ export default function WardrobeModal({
                     <div className="absolute -bottom-1 -right-1 flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-muted border border-border shadow-sm">
                       <LockIcon className="size-2.5 text-muted-foreground" />
                       <span className="text-[10px] font-semibold text-muted-foreground leading-none">
-                        {accessory.unlockedAtLevel}
+                        {isEvolved && petLevel < ACCESSORY_REUNLOCK_LEVEL
+                          ? ACCESSORY_REUNLOCK_LEVEL
+                          : accessory.unlockedAtLevel}
                       </span>
                     </div>
                   )}
@@ -136,7 +140,9 @@ export default function WardrobeModal({
 
         {/* Footer */}
         <div className="px-5 pb-5 pt-1 text-center text-[11px] text-muted-foreground">
-          Accessories unlock as your pet levels up.
+          {isEvolved && petLevel < ACCESSORY_REUNLOCK_LEVEL
+            ? `Evolved pets must reach Lv.${ACCESSORY_REUNLOCK_LEVEL} to wear accessories again.`
+            : 'Accessories unlock as your pet levels up.'}
         </div>
       </div>
     </div>
